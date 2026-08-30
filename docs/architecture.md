@@ -14,7 +14,8 @@ behind the scenes.
 | Frontend   | React + TypeScript      |
 | Build      | Vite                    |
 | Backend    | FastAPI (Python 3.11+)  |
-| Database   | SQLite (via aiosqlite)  |
+| Database   | SQLite (via SQLAlchemy + aiosqlite) |
+| Migrations | Alembic                 |
 | Realtime   | WebSocket (planned)     |
 | Packaging  | Electron (later phase)  |
 
@@ -34,11 +35,12 @@ Reignite/
 ├── backend/            # FastAPI application
 │   ├── app/
 │   │   ├── api/        # Route handlers (thin — delegate to services)
-│   │   ├── core/       # Configuration, logging
+│   │   ├── core/       # Configuration, logging, secrets
 │   │   ├── services/   # Business logic (the real work)
 │   │   ├── models/     # Pydantic schemas / data models
-│   │   ├── storage/    # Database access layer
+│   │   ├── storage/    # Database, SQLAlchemy models, repositories
 │   │   └── adapters/   # External system integrations
+│   ├── alembic/        # Database migrations
 │   └── tests/
 │
 ├── legacy/             # Original Python implementation (preserved)
@@ -95,19 +97,64 @@ Services in `app/services/` contain all the real work:
 Services depend on the storage layer and adapters, never on the API layer
 or the frontend.
 
-### 4. Storage Layer
+### 4. Repository Layer (Data Access)
 
-**Responsibility:** Data persistence — SQLite database access.
+**Responsibility:** Persistence — CRUD operations against SQLite.
 
-The storage layer in `app/storage/` provides:
+Repositories in `app/storage/repositories.py` provide clean data access:
 
-- Database connection management (`database.py`)
-- Query helpers (future: repositories or DAOs)
+- `ProviderRepository` — provider CRUD
+- `ModelRepository` — model CRUD with provider relationships
+- `CredentialRepository` — credential metadata CRUD (secrets stored separately)
+- `SessionRepository` — session metadata CRUD (secrets stored separately)
+- `RotationRepository` — rotation event persistence
+- `UsageRepository` — usage snapshot persistence
+- `SettingsRepository` — application settings CRUD
+- `EventRepository` — structured event persistence
+- `HealthRepository` — health check result persistence
 
-Services call the storage layer to read and write data. The storage layer
-does not contain business logic.
+Repositories do NOT contain business logic. They only handle persistence.
+Services call repositories; repositories never call services.
 
-### 5. Adapter Layer
+### 5. Secret Storage Boundary
+
+**Responsibility:** Secure storage of actual secret values.
+
+The database stores only:
+- `secret_ref` — a reference ID into the SecretStore
+- `key_masked` / `session_masked` — masked display values
+
+Actual secrets (API keys, session cookies) are stored in the `SecretStore`
+abstraction (`app/core/secrets.py`). The current implementation is a
+`FileSecretStore` that writes secrets to individual files outside the database.
+
+**Why not encrypt in SQLite?**
+Adding sqlcipher introduces a native dependency that complicates the build.
+The file-based store keeps the boundary clean and makes the future swap to
+Windows Credential Manager (via `keyring`) trivial.
+
+**Future:** During the Electron phase, swap in `keyring` for Windows-native
+secret storage. The `SecretStore` interface makes this a drop-in replacement.
+
+### 6. Storage Layer (Database)
+
+**Responsibility:** SQLite database via SQLAlchemy.
+
+- SQLAlchemy async engine with aiosqlite driver
+- WAL journal mode for concurrent read performance
+- Foreign keys enabled for relational integrity
+- Alembic for deterministic schema migrations
+- 9 tables: providers, models, credentials, sessions, rotation_events,
+  usage_snapshots, settings, events, health_checks
+
+**Why SQLite?**
+- Zero configuration — no database server to manage
+- Single file — easy to backup, move, and version
+- Sufficient for a local single-user application
+- WAL mode handles concurrent reads from the web UI and background workers
+- Can be migrated to PostgreSQL later if needed
+
+### 7. Adapter Layer
 
 **Responsibility:** External system integrations.
 
@@ -119,7 +166,7 @@ Adapters in `app/adapters/` encapsulate communication with external systems:
 
 Adapters are called by services, never by the API layer or frontend directly.
 
-### 6. Realtime (Planned — Phase 6)
+### 8. Realtime (Planned — Phase 6)
 
 WebSocket or Server-Sent Events will push real-time updates to the frontend:
 
@@ -133,7 +180,7 @@ The frontend has a `realtime` client stub (`src/lib/realtime.ts`) that
 establishes the interface now. The actual WebSocket implementation will
 arrive in Phase 6.1.
 
-### 7. Electron (Planned — Phase 7)
+### 9. Electron (Planned — Phase 7)
 
 The web application will be wrapped in Electron for Windows packaging:
 
@@ -145,36 +192,31 @@ The web application will be wrapped in Electron for Windows packaging:
 Electron should NOT duplicate backend business logic. It wraps the existing
 web application and adds OS-level integration.
 
-## Why Business Logic Must Stay Outside React
+## Migration Strategy
 
-1. **Testability:** Services can be tested independently of the UI.
-2. **Reusability:** The same service works for the web UI, Electron, CLI,
-   and future API consumers.
-3. **Separation of concerns:** UI code handles rendering and interaction;
-   service code handles rules and state.
-4. **Security:** Secrets and credentials are managed server-side, never
-   exposed to the frontend bundle.
-5. **Maintainability:** Changes to business logic don't require UI changes
-   and vice versa.
+Database schema changes are managed by Alembic:
 
-## Configuration
+1. Modify SQLAlchemy models in `app/storage/models.py`
+2. Generate a migration: `alembic revision --autogenerate -m "description"`
+3. Review the generated migration in `alembic/versions/`
+4. Apply: `alembic upgrade head`
 
-All configuration flows through `app/core/config.py` using Pydantic Settings.
-Environment variables are prefixed with `GCC_`. See `.env.example` for the
-full list.
+For fresh databases, `init_database()` uses `create_all` which creates all
+tables from the current models. Alembic is used for upgrading existing
+databases.
 
 ## What Is Intentionally NOT Implemented Yet
 
-Phase 1.1 establishes the skeleton only. The following are NOT implemented:
+Phase 1.2 establishes the data foundation only. The following are NOT implemented:
 
-- Gateway proxy logic (Phase 1.4)
+- Gateway proxy logic (Phase 3.1)
 - Credential management (Phase 2.1)
 - Session management (Phase 2.2)
 - Provider dashboard API client (Phase 2.3)
 - Auto-discovery (Phase 2.4)
-- Usage tracking (Phase 3.1)
-- Rotation (Phase 3.2)
-- Provider CRUD (Phase 4.1)
+- Usage tracking (Phase 3.2)
+- Rotation (Phase 3.3)
+- Provider CRUD UI (Phase 4.1)
 - Model management (Phase 4.2)
 - Realtime WebSocket (Phase 6.1)
 - Electron packaging (Phase 7)
@@ -191,4 +233,4 @@ The `legacy/` directory contains the original Python implementation:
 - `rotate_now.py` — Manual key rotation
 
 These files are preserved as reference material. They will be studied and
-incrementally replaced during Phases 1.4 through 4.x.
+incrementally replaced during Phases 2 and 3.

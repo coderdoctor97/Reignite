@@ -2,708 +2,272 @@
 
 ## 1. Project Identity
 
-Project:
-Gateway Control Center
+**Project:** Gateway Control Center
 
-Purpose:
-Build a polished local web-based control center for a Windows-hosted AI API gateway.
+**Purpose:** Build a polished local web-based control center for a Windows-hosted AI API gateway.
 
-The application must provide a stable local gateway interface while allowing the user to manage credentials, sessions, providers, models, usage, rotation, health, logs, and configuration from a unified UI.
+The application provides a stable local gateway interface while allowing the user to manage credentials, sessions, providers, models, usage, rotation, health, logs, and configuration from a unified UI.
 
-The current repository contains a legacy Python implementation. The legacy implementation is the reference for existing behavior, but it is not the final architecture.
+**Target platform:** Windows (primary). The final product is a local Windows developer/system utility.
 
----
-
-# 2. Primary Goal
-
-Transform the existing Python/Tkinter gateway-management system into:
-
-    React + TypeScript frontend
-              ↓
-          FastAPI backend
-              ↓
-       Gateway / key-management services
-
-The first milestone is a fully functional LOCAL WEB APPLICATION.
-
-Electron packaging is a later phase.
-
-Do NOT begin Electron implementation until the web application is functionally complete and tested.
+**Current status:** Phase 1.2 — Data foundation.
 
 ---
 
-# 3. Critical Scope
+## 2. Architecture
 
-The new system MUST provide:
+```
+React + TypeScript (Vite)
+        ↓  HTTP + WebSocket
+    FastAPI backend
+        ↓
+    Service layer (business logic)
+        ↓
+    Repository layer (persistence)
+        ↓
+    Adapter layer (external systems)
+        ↓
+    SQLite (application state)
+```
 
-1. Gateway lifecycle management
-2. Gateway health/status
-3. Session management
-4. Manual credential entry
-5. Automatic credential retrieval when supported
-6. Automatic credential rotation
+**Key principle:** Business logic must NOT live in React components.
+
+- **React:** presentation and user interaction only
+- **FastAPI:** API boundary — validate requests, call services, format responses
+- **Services:** all business logic, credential handling, rotation, health checks
+- **Repositories:** data persistence — CRUD against SQLite, no business rules
+- **Adapters:** external system integrations (provider APIs, dashboard APIs)
+- **Storage:** SQLite database, secret store abstraction
+
+React must never directly read credential files, manipulate gateway processes, call provider dashboard APIs, perform credential rotation, or manage secrets. Those responsibilities belong in the backend.
+
+---
+
+## 3. Scope
+
+### In scope
+
+1. Gateway lifecycle management (start/stop/restart)
+2. Gateway health and status
+3. Session management (first-class feature — manual entry, validation, replacement)
+4. Manual credential entry (mandatory fallback)
+5. Automatic credential retrieval (optional — must be recoverable when it fails)
+6. Automatic credential rotation (must support multiple triggers, not just token thresholds)
 7. Manual rotation
-8. Provider management
-9. Model management
-10. Usage tracking
-11. Logs
-12. Health checks
+8. Provider management (configurable, extensible)
+9. Model management (per-provider, with defaults and fallbacks)
+10. Usage tracking (current, historical, per-credential)
+11. Structured logs and events
+12. Health checks (gateway, provider, session)
 13. Stable local API endpoint
 14. Configuration management
 15. Safe secret handling
 
-The low-latency gateway implementation is OUT OF SCOPE.
+### Out of scope
 
-Do not port, depend on, optimize, or reproduce the low-latency gateway.
-
-Use the normal gateway implementation as the legacy reference.
-
----
-
-# 4. Legacy Code Rule
-
-All existing Python scripts provided by the user are considered LEGACY SOURCE.
-
-Preserve them.
-
-Do not delete them.
-
-Do not overwrite them during the migration.
-
-The legacy implementation must first be studied and documented.
-
-The legacy code should be copied under:
-
-    legacy/
-
-The following files are important reference components:
-
-    OpusGateway.py
-    KeyBinder.py
-    rotate_now.py
-    pull_latest_key.py
-    key_poller.py
-
-The legacy Tkinter controller is also reference material but must NOT become the foundation of the new UI.
+- **Low-latency gateway** — explicitly excluded. Do not port, depend on, optimize, or reproduce it.
+- Cloud deployment
+- Remote user authentication
+- Chat/prompt playground
+- Unrelated AI features
+- Electron until the web application is functionally complete and tested
 
 ---
 
-# 5. Existing Architecture
+## 4. Core Design Principles
 
-The current legacy architecture roughly consists of:
+### 4.1 Stable local gateway endpoint
 
-    Tkinter Control Panel
-             ↓
-    process management
-             ↓
-    Gateway
-    KeyBinder
-    Rotation script
-    Key polling script
-             ↓
-    active credential file
-             ↓
-    upstream provider
+The local client-facing endpoint must remain stable. Client applications should not need to know which credential is active, which session is active, which upstream provider is active, whether rotation occurred, or how credentials were obtained. The local gateway is the stable abstraction layer.
 
-The legacy gateway reloads its active credential periodically and tracks token usage.
+### 4.2 Session management is first-class
 
-The legacy key manager watches usage and signals rotation.
+The UI must provide a manual session-management workflow: display status, manually enter/replace, validate, save, show last validation time, show last error. Never assume a session credential can be automatically refreshed. Automatic session handling must be disableable when unsupported.
 
-The legacy rotation process creates a new credential and updates the active credential.
+### 4.3 Manual credential entry is mandatory
 
-The legacy polling process attempts to retrieve the latest credential.
+The user must always be able to paste a credential directly into the UI. Automatic discovery is optional and must degrade gracefully. The user must never need to manually edit `active_key.txt` for normal operation.
 
-The new architecture should eventually consolidate these responsibilities into explicit backend services.
+### 4.4 Rotation must support multiple triggers
 
----
+Rotation must support: manual trigger, usage-threshold trigger, provider quota/rate-limit trigger, invalid/expired credential trigger, and scheduled trigger. Quota, rate-limit, and invalid-credential failures must be distinguishable from each other. Do not rely on a single local token counter. Every automatic retry must have a bounded retry count, logging, cooldown/backoff, and clear failure reporting.
 
-# 6. Required New Architecture
+### 4.5 Providers and models are configurable
 
-Backend:
+Do not hard-code one upstream provider. A provider record supports: id, name, protocol, base_url, auth_type, enabled, health, metadata. Models belong to providers and support: display_name, context_window, capabilities, enabled, default/fallback role. The adapter pattern makes additional providers possible later.
 
-    FastAPI
-    Python
-    service-oriented internal architecture
+### 4.6 No business logic in React
 
-Frontend:
+All sensitive operations (credential management, rotation, session auth, provider API calls) go through backend services. React components call the backend API via the centralized `api` client. This separation must remain intact.
 
-    React
-    TypeScript
-    Vite
+### 4.7 Secrets are never exposed
 
-State:
+Never commit API keys, commit session credentials, print full credentials to logs, render full credentials in the UI, place credentials in source code, or expose credentials through frontend state. Use masked representations (e.g., `************AB12`). All secret-bearing operations go through a backend-controlled abstraction.
 
-    SQLite for structured application state
+### 4.8 Application state uses the database
 
-Realtime:
-
-    WebSocket or Server-Sent Events
-
-Later:
-
-    Electron
-
-Recommended backend services:
-
-    GatewayManager
-    KeyManager
-    SessionManager
-    RotationManager
-    ProviderManager
-    ModelManager
-    UsageManager
-    HealthManager
-    ProcessManager
+Application state must not rely on the old file-based IPC architecture (shared files on disk for inter-process communication). Use SQLite for structured state. Legacy compatibility files may exist temporarily during migration but are not the long-term solution.
 
 ---
 
-# 7. Stable Local Gateway Principle
+## 5. Legacy Code
 
-The local client-facing endpoint must remain stable.
+All existing Python scripts under `legacy/` are **reference material**, not the final architecture.
 
-Client applications should not need to know:
+Preserved files:
+- `OpusGateway.py` — HTTP proxy with usage tracking (the normal gateway reference)
+- `OpusControlPanel.py` — Tkinter GUI controller
+- `KeyBinder.py` — Usage watcher and rotation signal
+- `key_poller.py` — Automatic key polling wrapper
+- `pull_latest_key.py` — Key discovery from provider dashboard
+- `rotate_now.py` — Manual key rotation
 
-- which credential is active
-- which session is active
-- which upstream provider is active
-- whether rotation occurred
-- whether the provider endpoint changed
-- how credentials were obtained
+Do not delete or overwrite legacy files. Study them, document findings, and incrementally replace their behavior with cleaner backend services.
 
-The local gateway acts as the stable abstraction layer.
-
----
-
-# 8. Session Management
-
-The UI MUST provide a manual session-management workflow.
-
-Required capabilities:
-
-- display session status
-- manually enter/replace session credential
-- validate session
-- save session
-- show last validation time
-- show last successful credential fetch
-- show last error
-- disable automatic session handling when unsupported
-
-Never assume that a session credential can automatically be refreshed.
-
-First determine the authentication mechanism from the legacy implementation and current provider behavior.
+**Known legacy issues (from Phase 0):**
+- Hardcoded session cookie in 3 files — almost certainly expired
+- Inconsistent thresholds across 4 files (270K, 300K, 1.35M, 1.5M)
+- Duplicated API client code in 3 files
+- No session expiry detection
+- File-based IPC is slow and fragile
+- SSL verification disabled everywhere
 
 ---
 
-# 9. Credential Management
+## 6. Technology Stack
 
-The UI MUST support:
-
-### Automatic mode
-
-Discover and activate credentials automatically when possible.
-
-### Manual mode
-
-Allow the user to paste a credential directly into the UI.
-
-### Hybrid mode
-
-Allow automatic management with manual override.
-
-The user must never need to manually edit:
-
-    active_key.txt
-
-for normal operation.
-
-The backend may maintain compatibility with the legacy file during migration.
+| Layer | Technology | Notes |
+|-------|-----------|-------|
+| Frontend | React + TypeScript | Vite build |
+| Backend | FastAPI (Python 3.11+) | Async, service-oriented |
+| Database | SQLite | Via aiosqlite, WAL mode |
+| Migrations | Alembic | Deterministic upgrades |
+| Realtime | WebSocket or SSE | Phase 6 |
+| Packaging | Electron | Phase 7 (later) |
 
 ---
 
-# 10. Rotation Rules
+## 7. Phased Roadmap
 
-Rotation MUST eventually support:
+### Phase 1 — Foundation
+- **1.1** Project scaffolding — **DONE**
+- **1.2** Data foundation + AGENT.md update — **CURRENT**
+- **1.3** Configuration foundation hardening
+- **1.4** Gateway service architecture
 
-1. manual rotation
-2. usage-threshold rotation
-3. provider quota/rate-limit-triggered rotation
-4. invalid/expired credential-triggered rotation
-5. automatic latest-credential discovery
+### Phase 2 — Credential & Session Management
+- **2.1** Manual credential management
+- **2.2** Session management
+- **2.3** Provider dashboard client
+- **2.4** Automatic credential discovery
 
-Do not rely on a single local token counter.
+### Phase 3 — Gateway & Rotation
+- **3.1** Gateway proxy migration
+- **3.2** Usage tracking
+- **3.3** Rotation engine
+- **3.4** Failure-triggered rotation
+- **3.5** Recovery and rollback
 
-A request-level failure from the upstream provider is an important rotation signal when it clearly indicates credential exhaustion or invalidity.
+### Phase 4 — Providers & Models
+- **4.1** Provider management
+- **4.2** Model management
+- **4.3** Routing and fallbacks
 
-Avoid infinite retry loops.
+### Phase 5 — Frontend
+- **5.1** Functional dashboard
+- **5.2** Credentials/session UI
+- **5.3** Provider/model UI
+- **5.4** Logs and history
+- **5.5** Settings
 
-Every automatic retry must have:
+### Phase 6 — Realtime & Reliability
+- **6.1** WebSocket/SSE
+- **6.2** Health monitoring
+- **6.3** Structured events
+- **6.4** Resilience testing
 
-- a bounded retry count
-- logging
-- cooldown/backoff
-- clear failure reporting
-
----
-
-# 11. Provider System
-
-Providers must be configurable.
-
-Do not hard-code one upstream provider into the UI architecture.
-
-A provider record should support:
-
-    id
-    name
-    protocol
-    base_url
-    authentication configuration
-    models
-    enabled
-    health
-    metadata
-
-Initial protocols:
-
-    openai-completions
-    anthropic-messages
-
-The architecture should make additional adapters possible later.
+### Phase 7 — Electron
+- **7.1** Electron wrapper
+- **7.2** Tray integration
+- **7.3** Startup management
+- **7.4** Native notifications
+- **7.5** Windows packaging
 
 ---
 
-# 12. Model System
+## 8. Development Workflow
 
-Models belong to providers.
+The project is built in **phases**. Each phase has **subphases**. Each subphase has **one concrete task**.
 
-A model record should support:
+Do not jump ahead. Do not implement future phases unless explicitly instructed.
 
-    id
-    provider_id
-    display_name
-    context_window
-    capabilities
-    enabled
-    default
-    metadata
+After completing a subphase:
+1. Explain what changed
+2. List files changed
+3. Report tests performed and results
+4. Report failures
+5. Report unresolved questions
+6. Provide a short phase summary
+7. **STOP**
 
-Support:
-
-- default model
-- fallback model
-- model health
-- manual model selection
-
-Do not assume that every provider exposes the same model capabilities.
+Do not automatically continue to the next phase. The user will review the summary before requesting the next task.
 
 ---
 
-# 13. Secrets
+## 9. Testing Rule
 
-NEVER:
+Every backend service must have automated tests. Tests must use isolated temporary databases. Do not test real external API calls. Do not use real secrets or production credentials.
 
-- commit API keys
-- commit session credentials
-- print full credentials to logs
-- render full credentials in the UI
-- place credentials in source code
-- expose credentials through frontend state unnecessarily
-
-Use masked representations.
-
-Example:
-
-    ************AB12
-
-All secret-bearing operations must go through a backend-controlled abstraction.
-
----
-
-# 14. UI Design Requirements
-
-The UI must feel like a serious desktop-grade developer tool.
-
-It must NOT look like a generic AI dashboard.
-
-Use the installed design skills in:
-
-    .agent/skills/
-
-The project should explicitly use:
-
-- anthropic frontend design skill for overall product quality
-- hallmark for avoiding generic AI-slop patterns
-- impeccable for final visual polish
-- animation-related skills where appropriate
-
-Before implementing major UI sections, inspect the relevant skill instructions.
-
-Do not blindly combine every design technique.
-
-Use design skills as guidance, not as decorative additions.
-
----
-
-# 15. UI Principles
-
-Prefer:
-
-- strong visual hierarchy
-- restrained color system
-- excellent typography
-- dense but readable information layout
-- purposeful motion
-- meaningful status indicators
-- clear error states
-- excellent loading states
-- keyboard accessibility
-- responsive layout
-- consistent spacing
-- clear destructive-action confirmation
-
-Avoid:
-
-- excessive gradients
-- meaningless glassmorphism
-- random glowing borders
-- oversized rounded cards
-- fake dashboard metrics
-- unnecessary animations
-- emoji-heavy interfaces
-- generic "AI SaaS" styling
-
----
-
-# 16. Dashboard Requirements
-
-The dashboard should eventually communicate:
-
-Gateway:
-- running/stopped
-- endpoint
-- health
-
-Credential:
-- active/inactive
-- source
-- last change
-
-Session:
-- valid/invalid
-- last validation
-
-Usage:
-- used
-- remaining
-- percentage
-- threshold
-
-Rotation:
-- automatic/manual
-- next trigger
-- last rotation
-- last error
-
-Provider:
-- health
-- latency
-- active model
-
-Logs:
-- recent activity
-- warnings
-- failures
-
----
-
-# 17. Error Handling
-
-Every failure must be observable.
-
-Errors should contain:
-
-- operation
-- timestamp
-- category
-- human-readable message
-- technical details where safe
-- retryability
-- suggested action where appropriate
-
-Never silently swallow failures.
-
----
-
-# 18. Logging
-
-Use structured logging internally.
-
-Log events such as:
-
-    gateway.started
-    gateway.stopped
-    gateway.failed
-    session.validated
-    session.failed
-    credential.fetched
-    credential.changed
-    rotation.started
-    rotation.completed
-    rotation.failed
-    provider.tested
-    provider.failed
-    model.tested
-
-Never log secrets.
-
----
-
-# 19. Backward Compatibility
-
-During migration:
-
-- preserve legacy behavior where reasonable
-- preserve existing file formats temporarily
-- allow migration from legacy state
-- avoid destructive changes
-- document incompatibilities
-
-The migration should be incremental.
-
----
-
-# 20. Testing Rule
-
-Every backend service must eventually have automated tests.
-
-At minimum test:
-
-- provider configuration
-- model configuration
-- session replacement
-- credential activation
-- credential polling
-- rotation
-- usage accounting
-- gateway restart
-- gateway failure recovery
-- invalid credential
-- rate-limit response
-- network failure
+At minimum test: provider CRUD, model CRUD, session management, credential management, rotation events, usage tracking, health checks, settings, gateway lifecycle, failure recovery.
 
 Do not claim a feature works without testing it.
 
 ---
 
-# 21. Development Workflow
+## 10. Code Quality
 
-The project is built in PHASES.
+Prefer: typed Python, typed TypeScript, small modules, explicit interfaces, dependency injection where useful, centralized configuration, clear error boundaries, testable services, minimal global state.
 
-Each phase has smaller SUBPHASES.
-
-Each subphase has ONE concrete task.
-
-Do not jump ahead.
-
-Do not implement future phases unless explicitly instructed.
-
-After completing a subphase:
-
-1. explain what changed
-2. list files changed
-3. report tests performed
-4. report failures
-5. report unresolved questions
-6. provide a short phase summary
-7. STOP
-
-Do not automatically continue to the next phase.
-
-The user will provide the summary for review before requesting the next task.
+Avoid: giant files, duplicated business logic, UI directly manipulating files, UI directly spawning arbitrary subprocesses, hidden background threads, undocumented magic constants.
 
 ---
 
-# 22. Initial Development Rule
+## 11. UI Design
 
-Before modifying code:
+The UI must feel like a serious desktop-grade developer tool. It must NOT look like a generic AI dashboard.
 
-1. inspect the complete repository
-2. inspect all legacy scripts
-3. inspect .agent/skills
-4. map dependencies
-5. document the existing behavior
-6. identify assumptions
-7. identify broken functionality
-8. identify authentication/session dependencies
+Prefer: strong visual hierarchy, restrained color system, excellent typography, dense but readable information layout, purposeful motion, meaningful status indicators, clear error states, keyboard accessibility.
 
-Do not begin the migration based on filename assumptions.
+Avoid: excessive gradients, meaningless glassmorphism, random glowing borders, oversized rounded cards, fake dashboard metrics, unnecessary animations, emoji-heavy interfaces, generic "AI SaaS" styling.
+
+Use design skills in `.agent/skills/` as guidance, not as decorative additions.
 
 ---
 
-# 23. Repository Exploration Rule
+## 12. Error Handling
 
-The user may provide a Git repository containing related functionality.
-
-If instructed to clone a repository:
-
-- clone it into the designated workspace
-- inspect it
-- do not blindly copy its code
-- document relevant functionality
-- preserve licensing information
-- distinguish reused code from newly written code
-
-The agent must never silently replace the current project with the cloned repository.
+Every failure must be observable. Errors should contain: operation, timestamp, category, human-readable message, technical details where safe, retryability, suggested action. Never silently swallow failures.
 
 ---
 
-# 24. Code Quality
+## 13. Logging
 
-Prefer:
-
-- typed Python
-- typed TypeScript
-- small modules
-- explicit interfaces
-- dependency injection where useful
-- centralized configuration
-- clear error boundaries
-- testable services
-- minimal global state
-
-Avoid:
-
-- giant files
-- duplicated business logic
-- UI directly manipulating files
-- UI directly spawning arbitrary subprocesses
-- hidden background threads
-- undocumented magic constants
+Use structured logging internally. Log events such as: `gateway.started`, `gateway.stopped`, `gateway.failed`, `session.validated`, `session.failed`, `credential.fetched`, `credential.changed`, `rotation.started`, `rotation.completed`, `rotation.failed`, `provider.tested`, `provider.failed`. Never log secrets.
 
 ---
 
-# 25. Architecture Rule
+## 14. Backward Compatibility
 
-Business logic must NOT live in React components.
-
-React:
-    presentation + interaction
-
-FastAPI:
-    API boundary
-
-Services:
-    business logic
-
-Adapters:
-    external integrations
-
-Storage:
-    persistence
-
-This separation must remain intact.
+During migration: preserve legacy behavior where reasonable, preserve existing file formats temporarily, allow migration from legacy state, avoid destructive changes, document incompatibilities. Legacy compatibility files may exist temporarily but are not the long-term solution.
 
 ---
 
-# 26. Database Rule
+## 15. Definition of Success
 
-Do not introduce SQLite merely for decoration.
-
-Use it when structured state needs persistence.
-
-Suitable candidates include:
-
-- providers
-- models
-- session metadata
-- rotation history
-- provider health history
-- application settings
-- event history
-
-Do not store raw secrets in plaintext unless explicitly justified.
+The finished system should allow the user to: start/stop/restart the gateway, see gateway health, configure providers, configure models, configure a session credential, replace an expired session manually, enter a credential manually, fetch a credential automatically when supported, rotate credentials manually and automatically, observe usage, inspect logs, test endpoints, and use the same stable local gateway from different AI clients — without manually editing internal files.
 
 ---
 
-# 27. Electron Rule
+## 16. Most Important Instruction
 
-Electron is a LATER phase.
-
-Do not introduce Electron during the initial functional-web phase.
-
-Once the web application is stable:
-
-    React + FastAPI
-          ↓
-      Electron
-
-Electron should provide:
-
-- tray integration
-- startup
-- native notifications
-- lifecycle management
-- packaging
-- native Windows integration
-
-Do not duplicate backend business logic inside Electron.
-
----
-
-# 28. Scope Discipline
-
-Do not:
-
-- redesign unrelated functionality
-- add unnecessary AI features
-- add chat functionality
-- add a prompt playground
-- add cloud deployment
-- add authentication for remote users
-- add unnecessary analytics
-- add unrelated automation
-
-The project is a gateway control center.
-
----
-
-# 29. Definition of Success
-
-The finished system should allow the user to:
-
-1. start the gateway
-2. stop the gateway
-3. see gateway health
-4. configure providers
-5. configure models
-6. configure a session credential
-7. replace an expired session manually
-8. enter a credential manually
-9. fetch a credential automatically when supported
-10. rotate credentials manually
-11. rotate credentials automatically
-12. observe usage
-13. inspect logs
-14. test endpoints
-15. use the same stable local gateway from different AI clients
-
-without manually editing internal files.
-
----
-
-# 30. Most Important Instruction
-
-Do not treat the legacy implementation as correct simply because it previously worked.
-
-Treat it as:
-
-    historical implementation + behavioral reference
-
-Verify every important behavior.
-
-Where the old implementation is fragile, replace it with a cleaner design.
-
-The objective is not to reproduce the old code.
-
-The objective is to produce a reliable system that preserves the useful behavior while removing the fragile architecture.
+Do not treat the legacy implementation as correct simply because it previously worked. Treat it as historical implementation plus behavioral reference. Verify every important behavior. Where the old implementation is fragile, replace it with a cleaner design. The objective is not to reproduce the old code — it is to produce a reliable system that preserves the useful behavior while removing the fragile architecture.
