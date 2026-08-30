@@ -67,8 +67,8 @@ async def test_fresh_database_creation():
         tables = [row[0] for row in result.fetchall()]
 
     expected = [
-        "credentials", "events", "health_checks", "models",
-        "providers", "rotation_events", "sessions", "settings", "usage_snapshots",
+        "credentials", "credential_events", "events", "health_checks", "models",
+        "providers", "sessions", "settings", "usage_snapshots",
     ]
     for t in expected:
         assert t in tables, f"Missing table: {t}"
@@ -261,29 +261,36 @@ async def test_session_metadata_persistence(session, secret_store):
     assert by_provider.id == sess.id
 
 
-# ── Rotation Event Repository Tests ─────────────────────────────
+# ── Credential Event Repository Tests ────────────────────────────
 
 @pytest.mark.asyncio
-async def test_rotation_event_persistence(session):
-    """Rotation events should persist with all trigger types."""
-    from app.storage.repositories import RotationRepository
+async def test_credential_event_persistence(session):
+    """Credential events should persist with all event types."""
+    from app.storage.repositories import CredentialEventRepository
 
-    # Create events with different trigger types
-    for trigger in ["manual", "threshold", "rate-limit", "invalid-credential", "quota-exhausted", "scheduled", "recovery"]:
-        await RotationRepository.create(
+    # Create events with different event types
+    for event_type in [
+        "created", "imported_manually", "validated", "activated",
+        "deactivated", "expired", "invalid", "replacement_requested",
+        "replacement_completed", "warning_triggered", "provider_assisted_rotation",
+    ]:
+        await CredentialEventRepository.create(
             session,
-            trigger_type=trigger,
-            status="success" if trigger != "rate-limit" else "failed",
-            failure_reason="Rate limited by upstream" if trigger == "rate-limit" else None,
+            event_type=event_type,
+            status="success",
             duration_ms=1500,
         )
 
-    events = await RotationRepository.list_recent(session)
-    assert len(events) == 7
+    events = await CredentialEventRepository.list_recent(session)
+    assert len(events) == 11
 
-    # Verify trigger types are distinct
-    types = {e.trigger_type for e in events}
-    assert types == {"manual", "threshold", "rate-limit", "invalid-credential", "quota-exhausted", "scheduled", "recovery"}
+    # Verify event types are distinct
+    types = {e.event_type for e in events}
+    assert types == {
+        "created", "imported_manually", "validated", "activated",
+        "deactivated", "expired", "invalid", "replacement_requested",
+        "replacement_completed", "warning_triggered", "provider_assisted_rotation",
+    }
 
 
 # ── Usage Repository Tests ──────────────────────────────────────

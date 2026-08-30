@@ -66,6 +66,7 @@ class ProviderRow(Base):
     health_status = Column(String(32), nullable=False, default="unknown")  # 'healthy','degraded','unhealthy','unknown'
     last_health_check = Column(Text, nullable=True)
     metadata_json = Column(Text, nullable=True)  # arbitrary JSON
+    capabilities_json = Column(Text, nullable=True)  # JSON: {"credential_validation":true,"credential_discovery":false,...}
     created_at  = Column(Text, nullable=False, default=_utcnow)
     updated_at  = Column(Text, nullable=False, default=_utcnow, onupdate=_utcnow)
 
@@ -114,7 +115,8 @@ class CredentialRow(Base):
     - secret_ref: a reference into the SecretStore
     - key_masked: the last 4+ characters for display
 
-    Usage counters are tracked per-credential so rotation resets them.
+    Usage counters are tracked per-credential so they reset when
+    a new credential is activated.
     """
     __tablename__ = "credentials"
 
@@ -122,8 +124,11 @@ class CredentialRow(Base):
     provider_id     = Column(String(12), ForeignKey("providers.id", ondelete="CASCADE"), nullable=False)
     key_masked      = Column(String(64), nullable=True)   # e.g., "************AB12"
     secret_ref      = Column(String(255), nullable=True)  # reference into SecretStore
-    source          = Column(String(32), nullable=False, default="manual")  # 'manual','auto-discovered','rotated'
-    state           = Column(String(32), nullable=False, default="active")  # 'active','expired','revoked','rotating'
+    source          = Column(String(32), nullable=False, default="manual")  # 'manual','provider-assisted'
+    state           = Column(String(32), nullable=False, default="active")  # 'active','inactive','expired','invalid','revoked'
+    validation_status = Column(String(32), nullable=False, default="unknown")  # 'valid','invalid','expired','unknown'
+    last_validated  = Column(Text, nullable=True)
+    last_validation_error = Column(Text, nullable=True)
     usage_input     = Column(Integer, nullable=False, default=0)
     usage_output    = Column(Integer, nullable=False, default=0)
     usage_total     = Column(Integer, nullable=False, default=0)
@@ -168,30 +173,33 @@ class SessionRow(Base):
 
 
 # ─────────────────────────────────────────────────────────────────
-# Rotation Event
+# Credential Event
 # ─────────────────────────────────────────────────────────────────
 
-class RotationEventRow(Base):
-    """A record of a credential rotation attempt.
+class CredentialEventRow(Base):
+    """A record of a credential lifecycle event.
 
-    Trigger types:
-    - 'manual': user-initiated
-    - 'threshold': usage threshold exceeded
-    - 'rate-limit': upstream rate limit hit
-    - 'invalid-credential': upstream rejected the credential
-    - 'quota-exhausted': provider quota used up
-    - 'scheduled': timer-based
-    - 'recovery': automatic recovery after failure
+    Event types:
+    - 'created': credential record created
+    - 'imported_manually': user pasted a credential
+    - 'validated': credential validated against provider
+    - 'activated': credential set as active
+    - 'deactivated': credential deactivated
+    - 'expired': credential expired (detected by monitoring)
+    - 'invalid': credential rejected by provider
+    - 'replacement_requested': user requested replacement
+    - 'replacement_completed': new credential activated after replacement
+    - 'warning_triggered': monitoring detected a condition requiring attention
+    - 'provider_assisted_rotation': provider-specific rotation (where supported)
 
     Status: 'success', 'failed', 'timeout', 'skipped'
     """
-    __tablename__ = "rotation_events"
+    __tablename__ = "credential_events"
 
     id                  = Column(String(12), primary_key=True, default=_new_id)
     provider_id         = Column(String(12), ForeignKey("providers.id", ondelete="SET NULL"), nullable=True)
-    trigger_type        = Column(String(32), nullable=False)  # see docstring
-    old_credential_id   = Column(String(12), nullable=True)
-    new_credential_id   = Column(String(12), nullable=True)
+    credential_id       = Column(String(12), ForeignKey("credentials.id", ondelete="SET NULL"), nullable=True)
+    event_type          = Column(String(64), nullable=False, index=True)  # see docstring
     status              = Column(String(32), nullable=False)  # 'success','failed','timeout','skipped'
     failure_reason      = Column(Text, nullable=True)
     duration_ms         = Column(Integer, nullable=True)

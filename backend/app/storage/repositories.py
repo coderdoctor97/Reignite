@@ -21,7 +21,7 @@ from app.storage.models import (
     ModelRow,
     CredentialRow,
     SessionRow,
-    RotationEventRow,
+    CredentialEventRow,
     UsageSnapshotRow,
     SettingRow,
     EventRow,
@@ -299,31 +299,29 @@ class SessionRepository:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Rotation Repository
+# Credential Event Repository
 # ─────────────────────────────────────────────────────────────────
 
-class RotationRepository:
-    """CRUD for rotation events."""
+class CredentialEventRepository:
+    """CRUD for credential lifecycle events."""
 
     @staticmethod
     async def create(
         session: AsyncSession,
         *,
-        trigger_type: str,
+        event_type: str,
         status: str,
         provider_id: Optional[str] = None,
-        old_credential_id: Optional[str] = None,
-        new_credential_id: Optional[str] = None,
+        credential_id: Optional[str] = None,
         failure_reason: Optional[str] = None,
         duration_ms: Optional[int] = None,
         details_json: Optional[str] = None,
-    ) -> RotationEventRow:
-        row = RotationEventRow(
-            trigger_type=trigger_type,
+    ) -> CredentialEventRow:
+        row = CredentialEventRow(
+            event_type=event_type,
             status=status,
             provider_id=provider_id,
-            old_credential_id=old_credential_id,
-            new_credential_id=new_credential_id,
+            credential_id=credential_id,
             failure_reason=failure_reason,
             duration_ms=duration_ms,
             details_json=details_json,
@@ -333,20 +331,30 @@ class RotationRepository:
         return row
 
     @staticmethod
-    async def list_recent(session: AsyncSession, limit: int = 50) -> list[RotationEventRow]:
+    async def list_recent(session: AsyncSession, limit: int = 50) -> list[CredentialEventRow]:
         result = await session.execute(
-            select(RotationEventRow)
-            .order_by(RotationEventRow.created_at.desc())
+            select(CredentialEventRow)
+            .order_by(CredentialEventRow.created_at.desc())
             .limit(limit)
         )
         return list(result.scalars().all())
 
     @staticmethod
-    async def list_by_provider(session: AsyncSession, provider_id: str, limit: int = 50) -> list[RotationEventRow]:
+    async def list_by_provider(session: AsyncSession, provider_id: str, limit: int = 50) -> list[CredentialEventRow]:
         result = await session.execute(
-            select(RotationEventRow)
-            .where(RotationEventRow.provider_id == provider_id)
-            .order_by(RotationEventRow.created_at.desc())
+            select(CredentialEventRow)
+            .where(CredentialEventRow.provider_id == provider_id)
+            .order_by(CredentialEventRow.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def list_by_credential(session: AsyncSession, credential_id: str, limit: int = 50) -> list[CredentialEventRow]:
+        result = await session.execute(
+            select(CredentialEventRow)
+            .where(CredentialEventRow.credential_id == credential_id)
+            .order_by(CredentialEventRow.created_at.desc())
             .limit(limit)
         )
         return list(result.scalars().all())

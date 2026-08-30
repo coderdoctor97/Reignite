@@ -3,9 +3,36 @@
 ## Overview
 
 The Gateway Control Center is a local web application that manages an AI API
-gateway. It provides a stable local endpoint for AI clients while handling
-credential management, rotation, provider configuration, and usage tracking
-behind the scenes.
+gateway. It is primarily a **Gateway + Credential Monitor + Management Center**.
+It is NOT primarily an automatic credential-rotation system.
+
+The application provides a stable local endpoint for AI clients while monitoring
+credential health, tracking usage, and helping the user manage credentials,
+sessions, providers, and models.
+
+## Core Policy
+
+### Monitoring is universal, credential generation is provider-specific
+
+All providers support monitoring (usage, health, errors). Credential generation,
+discovery, and revocation are provider-specific capabilities that must be
+explicitly declared and user-initiated.
+
+### Manual replacement is universal
+
+The user must always be able to paste a credential directly into the UI. This
+works for every provider, always.
+
+### Sessions are not credentials
+
+Session state, API credential state, and provider configuration are separate
+concepts. Never conflate them.
+
+### The application does not act silently
+
+The application must NOT silently generate, delete, revoke, replace, or rotate
+credentials unless a specific provider adapter explicitly supports such a workflow
+AND the user explicitly enables and initiates it.
 
 ## Technology Stack
 
@@ -63,7 +90,7 @@ API via the centralized `api` client (`src/lib/api.ts`). They do NOT:
 - Read credential files directly
 - Manipulate gateway processes
 - Call provider dashboard APIs
-- Perform credential rotation
+- Perform credential operations
 - Manage secrets
 
 All business logic is delegated to the backend via API calls.
@@ -84,13 +111,12 @@ logic, database queries, or external API calls directly.
 Services in `app/services/` contain all the real work:
 
 - `GatewayManager` — start/stop/restart the gateway process
-- `KeyManager` — load, save, validate, and mask credentials
-- `SessionManager` — manage session credentials for provider dashboards
-- `RotationManager` — manual and automatic credential rotation
-- `ProviderManager` — CRUD and health checks for providers
+- `CredentialManager` — manual entry, validation, activation, health monitoring
+- `SessionManager` — manual replacement, validation, health monitoring
+- `ProviderManager` — CRUD, health checks, capability declarations
 - `ModelManager` — model configuration, defaults, fallbacks
 - `UsageManager` — token usage tracking and threshold alerts
-- `HealthManager` — health checks for gateway and providers
+- `HealthManager` — health checks for gateway, providers, sessions, credentials
 - `ProcessManager` — subprocess lifecycle management
 - `LogManager` — structured event logging
 
@@ -107,7 +133,7 @@ Repositories in `app/storage/repositories.py` provide clean data access:
 - `ModelRepository` — model CRUD with provider relationships
 - `CredentialRepository` — credential metadata CRUD (secrets stored separately)
 - `SessionRepository` — session metadata CRUD (secrets stored separately)
-- `RotationRepository` — rotation event persistence
+- `CredentialEventRepository` — credential lifecycle event persistence
 - `UsageRepository` — usage snapshot persistence
 - `SettingsRepository` — application settings CRUD
 - `EventRepository` — structured event persistence
@@ -128,11 +154,6 @@ Actual secrets (API keys, session cookies) are stored in the `SecretStore`
 abstraction (`app/core/secrets.py`). The current implementation is a
 `FileSecretStore` that writes secrets to individual files outside the database.
 
-**Why not encrypt in SQLite?**
-Adding sqlcipher introduces a native dependency that complicates the build.
-The file-based store keeps the boundary clean and makes the future swap to
-Windows Credential Manager (via `keyring`) trivial.
-
 **Future:** During the Electron phase, swap in `keyring` for Windows-native
 secret storage. The `SecretStore` interface makes this a drop-in replacement.
 
@@ -144,7 +165,7 @@ secret storage. The `SecretStore` interface makes this a drop-in replacement.
 - WAL journal mode for concurrent read performance
 - Foreign keys enabled for relational integrity
 - Alembic for deterministic schema migrations
-- 9 tables: providers, models, credentials, sessions, rotation_events,
+- 9 tables: providers, models, credentials, sessions, credential_events,
   usage_snapshots, settings, events, health_checks
 
 **Why SQLite?**
@@ -166,32 +187,6 @@ Adapters in `app/adapters/` encapsulate communication with external systems:
 
 Adapters are called by services, never by the API layer or frontend directly.
 
-### 8. Realtime (Planned — Phase 6)
-
-WebSocket or Server-Sent Events will push real-time updates to the frontend:
-
-- Gateway status changes
-- Usage threshold alerts
-- Rotation events
-- Health status changes
-- Log entries
-
-The frontend has a `realtime` client stub (`src/lib/realtime.ts`) that
-establishes the interface now. The actual WebSocket implementation will
-arrive in Phase 6.1.
-
-### 9. Electron (Planned — Phase 7)
-
-The web application will be wrapped in Electron for Windows packaging:
-
-- System tray integration
-- Auto-start on boot
-- Native notifications
-- Process lifecycle management
-
-Electron should NOT duplicate backend business logic. It wraps the existing
-web application and adds OS-level integration.
-
 ## Migration Strategy
 
 Database schema changes are managed by Alembic:
@@ -207,30 +202,22 @@ databases.
 
 ## What Is Intentionally NOT Implemented Yet
 
-Phase 1.2 establishes the data foundation only. The following are NOT implemented:
+Phase 1.3 establishes the architecture/policy alignment only. The following
+are NOT implemented:
 
-- Gateway proxy logic (Phase 3.1)
-- Credential management (Phase 2.1)
-- Session management (Phase 2.2)
-- Provider dashboard API client (Phase 2.3)
-- Auto-discovery (Phase 2.4)
-- Usage tracking (Phase 3.2)
-- Rotation (Phase 3.3)
-- Provider CRUD UI (Phase 4.1)
-- Model management (Phase 4.2)
-- Realtime WebSocket (Phase 6.1)
-- Electron packaging (Phase 7)
+- Gateway proxy logic (Phase 2)
+- Credential management (Phase 3)
+- Session management (Phase 4)
+- Usage monitoring (Phase 5)
+- Provider system (Phase 6)
+- Model system (Phase 7)
+- Provider-specific credential workflows (Phase 8)
+- UI completion (Phase 9)
+- Electron packaging (Phase 10)
 
 ## Legacy Reference
 
-The `legacy/` directory contains the original Python implementation:
-
-- `OpusGateway.py` — HTTP proxy with usage tracking
-- `OpusControlPanel.py` — Tkinter GUI controller
-- `KeyBinder.py` — Usage watcher and rotation signal
-- `key_poller.py` — Automatic key polling
-- `pull_latest_key.py` — Key discovery from provider dashboard
-- `rotate_now.py` — Manual key rotation
-
-These files are preserved as reference material. They will be studied and
-incrementally replaced during Phases 2 and 3.
+The `legacy/` directory contains the original Python implementation. These
+files are preserved as reference material. See AGENT.md for the full
+classification of legacy behaviors (useful, fragile, provider-specific,
+no longer desired).

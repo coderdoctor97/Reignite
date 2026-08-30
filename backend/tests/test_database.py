@@ -38,8 +38,8 @@ async def test_database_init_creates_tables():
         tables = [row[0] for row in result.fetchall()]
 
     expected = [
-        "credentials", "events", "health_checks", "models",
-        "providers", "rotation_events", "sessions", "settings", "usage_snapshots",
+        "credentials", "credential_events", "events", "health_checks", "models",
+        "providers", "sessions", "settings", "usage_snapshots",
     ]
     for t in expected:
         assert t in tables, f"Missing table: {t}"

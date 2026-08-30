@@ -13,26 +13,28 @@
 │  auth_type   │       │  context_win │       └──────────────┘
 │  enabled     │       │  capabilities│
 │  health_stat │       │  is_default  │       ┌──────────────┐
-│  metadata    │       │  is_fallback │       │    Event     │
-│  created_at  │       │  created_at  │       │  (log)       │
-│  updated_at  │       │  updated_at  │       │              │
-└──────┬───────┘       └──────────────┘       │  event_type  │
-       │                                      │  severity    │
+│  capabilities│       │  is_fallback │       │    Event     │
+│  metadata    │       │  created_at  │       │  (log)       │
+│  created_at  │       │  updated_at  │       │              │
+│  updated_at  │       └──────────────┘       │  event_type  │
+└──────┬───────┘                              │  severity    │
        │                                      │  message     │
-       ├────1:N────┌──────────────┐           │  details     │
-       │           │  Credential  │           │  created_at  │
-       │           │              │           └──────────────┘
-       │           │  id          │
-       │           │  provider_id │           ┌──────────────┐
-       │           │  key_masked  │           │ HealthCheck  │
-       │           │  secret_ref  │           │              │
-       │           │  source      │           │  target_type │
-       │           │  state       │           │  target_id   │
-       │           │  usage_*     │           │  status      │
-       │           │  activated_at│           │  latency_ms  │
-       │           │  created_at  │           │  details     │
-       │           └──────┬───────┘           │  checked_at  │
-       │                  │                   └──────────────┘
+       │                                      │  details     │
+       ├────1:N────┌──────────────┐           │  created_at  │
+       │           │  Credential  │           └──────────────┘
+       │           │              │
+       │           │  id          │           ┌──────────────┐
+       │           │  provider_id │           │ HealthCheck  │
+       │           │  key_masked  │           │              │
+       │           │  secret_ref  │           │  target_type │
+       │           │  source      │           │  target_id   │
+       │           │  state       │           │  status      │
+       │           │  validation  │           │  latency_ms  │
+       │           │  usage_*     │           │  details     │
+       │           │  activated_at│           │  checked_at  │
+       │           │  created_at  │           └──────────────┘
+       │           └──────┬───────┘
+       │                  │
        │                  ├─1:N──┌──────────────────┐
        │                  │      │  UsageSnapshot   │
        │                  │      │                  │
@@ -45,6 +47,17 @@
        │                  │      │  snapshot_at     │
        │                  │      └──────────────────┘
        │                  │
+       │                  └─1:N──┌──────────────────────┐
+       │                         │  CredentialEvent     │
+       │                         │                      │
+       │                         │  event_type          │
+       │                         │  credential_id       │
+       │                         │  provider_id         │
+       │                         │  status              │
+       │                         │  failure_reason      │
+       │                         │  created_at          │
+       │                         └──────────────────────┘
+       │
        ├────1:N────┌──────────────┐
        │           │   Session    │
        │           │              │
@@ -56,20 +69,6 @@
        │           │  last_valid  │
        │           │  created_at  │
        │           └──────────────┘
-       │
-       └────1:N────┌──────────────────┐
-                   │  RotationEvent   │
-                   │                  │
-                   │  id              │
-                   │  provider_id     │
-                   │  trigger_type    │
-                   │  old_credential  │
-                   │  new_credential  │
-                   │  status          │
-                   │  failure_reason  │
-                   │  duration_ms     │
-                   │  created_at      │
-                   └──────────────────┘
 ```
 
 ## Entities
@@ -89,8 +88,22 @@ Represents an upstream API endpoint/integration (e.g., opus.abhibots.com).
 | health_status | String(32) | `healthy`, `degraded`, `unhealthy`, `unknown` |
 | last_health_check | Text | ISO timestamp of last health check |
 | metadata_json | Text | Arbitrary JSON metadata |
+| capabilities_json | Text | JSON declaring provider capabilities (see below) |
 | created_at | Text | ISO timestamp |
 | updated_at | Text | ISO timestamp |
+
+**Provider capabilities** (`capabilities_json`):
+```json
+{
+  "credential_validation": true,
+  "credential_discovery": false,
+  "credential_generation": false,
+  "credential_revocation": false
+}
+```
+
+These capabilities are provider-specific. The application must NOT assume
+they exist for all providers.
 
 **Owns:** credentials, sessions, models
 
@@ -124,8 +137,11 @@ here — only a reference into the SecretStore and a masked display value.
 | provider_id | String(12) | FK → providers.id (CASCADE delete) |
 | key_masked | String(64) | Masked display value (e.g., `************AB12`) |
 | secret_ref | String(255) | Reference ID into the SecretStore |
-| source | String(32) | `manual`, `auto-discovered`, `rotated` |
-| state | String(32) | `active`, `expired`, `revoked`, `rotating` |
+| source | String(32) | `manual`, `provider-assisted` |
+| state | String(32) | `active`, `inactive`, `expired`, `invalid`, `revoked` |
+| validation_status | String(32) | `valid`, `invalid`, `expired`, `unknown` |
+| last_validated | Text | ISO timestamp of last validation |
+| last_validation_error | Text | Last validation error message |
 | usage_input | Integer | Input tokens consumed by this credential |
 | usage_output | Integer | Output tokens consumed by this credential |
 | usage_total | Integer | Total tokens consumed |
@@ -143,6 +159,9 @@ points to the secret's location in the store.
 A session credential for provider dashboard access (e.g., web session cookie).
 Used for operations like key management that require dashboard authentication.
 
+Sessions are NOT the same as API credentials. The application treats session
+state, API credential state, and provider configuration as separate concepts.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | id | String(12) | Primary key |
@@ -157,31 +176,36 @@ Used for operations like key management that require dashboard authentication.
 | created_at | Text | ISO timestamp |
 | updated_at | Text | ISO timestamp |
 
-### RotationEvent
+### CredentialEvent
 
-A record of a credential rotation attempt.
+A record of a credential lifecycle event. This replaces the previous
+"rotation_events" table with a broader set of event types that reflect
+the monitor-first, user-controlled credential lifecycle.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | id | String(12) | Primary key |
 | provider_id | String(12) | FK → providers.id (SET NULL on delete) |
-| trigger_type | String(32) | What triggered the rotation (see below) |
-| old_credential_id | String(12) | ID of the credential that was replaced |
-| new_credential_id | String(12) | ID of the replacement credential |
+| credential_id | String(12) | FK → credentials.id (SET NULL on delete) |
+| event_type | String(64) | Event type (indexed, see below) |
 | status | String(32) | `success`, `failed`, `timeout`, `skipped` |
-| failure_reason | Text | Why the rotation failed (if applicable) |
-| duration_ms | Integer | How long the rotation took |
+| failure_reason | Text | Why the event failed (if applicable) |
+| duration_ms | Integer | How long the operation took |
 | details_json | Text | Additional context (JSON) |
 | created_at | Text | ISO timestamp |
 
-**Trigger types:**
-- `manual` — user-initiated from the UI
-- `threshold` — usage threshold exceeded
-- `rate-limit` — upstream rate limit hit
-- `invalid-credential` — upstream rejected the credential
-- `quota-exhausted` — provider quota used up
-- `scheduled` — timer-based rotation
-- `recovery` — automatic recovery after failure
+**Event types:**
+- `created` — credential record created
+- `imported_manually` — user pasted a credential
+- `validated` — credential validated against provider
+- `activated` — credential set as active
+- `deactivated` — credential deactivated
+- `expired` — credential expired (detected by monitoring)
+- `invalid` — credential rejected by provider
+- `replacement_requested` — user requested replacement
+- `replacement_completed` — new credential activated after replacement
+- `warning_triggered` — monitoring detected a condition requiring attention
+- `provider_assisted_rotation` — provider-specific rotation (where supported)
 
 ### UsageSnapshot
 
@@ -217,7 +241,7 @@ Structured application event log.
 | Field | Type | Description |
 |-------|------|-------------|
 | id | Integer | Auto-increment primary key |
-| event_type | String(128) | Event type (indexed): `gateway.started`, `rotation.completed`, etc. |
+| event_type | String(128) | Event type (indexed): `gateway.started`, `credential.warning`, etc. |
 | severity | String(16) | `debug`, `info`, `warn`, `error`, `critical` |
 | message | Text | Human-readable message |
 | details_json | Text | Additional context (JSON) |
@@ -225,19 +249,37 @@ Structured application event log.
 
 ### HealthCheck
 
-A health check result for a gateway, provider, or session.
+A health check result for a gateway, provider, session, or credential.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | id | Integer | Auto-increment primary key |
-| target_type | String(32) | `gateway`, `provider`, `session` (indexed) |
-| target_id | String(12) | FK to provider/session, or `local` for gateway |
+| target_type | String(32) | `gateway`, `provider`, `session`, `credential` (indexed) |
+| target_id | String(12) | FK to provider/session/credential, or `local` for gateway |
 | status | String(32) | `healthy`, `degraded`, `unhealthy` |
 | latency_ms | Float | Response latency in milliseconds |
 | details_json | Text | Additional context (JSON) |
 | checked_at | Text | ISO timestamp |
 
 ## Design Decisions
+
+### Monitor-first credential lifecycle
+
+The default credential lifecycle is: monitor → detect → warn → user action →
+validate → activate → continue monitoring. The application does NOT silently
+generate, delete, revoke, replace, or rotate credentials.
+
+### Credential events replace rotation events
+
+The `credential_events` table replaces the previous `rotation_events` table.
+The broader event types reflect the monitor-first policy: most events are
+about credential health and user actions, not automatic rotation.
+
+### Provider capabilities are declared, not assumed
+
+The `capabilities_json` field on providers declares what credential-management
+workflows the provider supports. The application must NOT assume these
+capabilities exist for all providers.
 
 ### Timestamps as ISO strings
 
@@ -261,7 +303,7 @@ event details without requiring schema migrations for every new field.
 ### Cascade deletes
 
 Deleting a provider cascades to its credentials, sessions, and models.
-Rotation events and usage snapshots use SET NULL to preserve history.
+Credential events and usage snapshots use SET NULL to preserve history.
 
 ### Short IDs
 
