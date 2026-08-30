@@ -20,6 +20,7 @@ from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger
 from app.storage.database import init_database, close_database
 from app.api.health import router as health_router
+from app.api.gateway import router as gateway_router
 
 
 @asynccontextmanager
@@ -65,6 +66,7 @@ def create_app() -> FastAPI:
 
     # Register API routers
     app.include_router(health_router)
+    app.include_router(gateway_router)
 
     return app
 

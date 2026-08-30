@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     # ── Legacy compatibility ─────────────────────────────────────
     legacy_base_dir: str = str(_PROJECT_ROOT / "legacy")
 
+    # ── Gateway process ──────────────────────────────────────────
+    gateway_script: str = "OpusGateway.py"
+    gateway_host: str = "127.0.0.1"
+    gateway_port: int = 5800
+    gateway_startup_timeout: float = 10.0
+    gateway_shutdown_timeout: float = 5.0
+
     model_config = {
         "env_prefix": "GCC_",
         "env_file": str(_PROJECT_ROOT / ".env"),

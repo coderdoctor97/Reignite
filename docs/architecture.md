@@ -187,6 +187,47 @@ Adapters in `app/adapters/` encapsulate communication with external systems:
 
 Adapters are called by services, never by the API layer or frontend directly.
 
+### 8. GatewayManager
+
+**Responsibility:** Lifecycle management of the gateway subprocess.
+
+`GatewayManager` (`app/services/gateway_manager.py`) owns the gateway process:
+
+- **start()** — launch the gateway script as a subprocess, wait for port readiness
+- **stop()** — graceful terminate, force-kill on timeout
+- **restart()** — stop + start
+- **status()** — return process state (PID, uptime, restart count, exit code)
+- **health()** — test process liveness AND port reachability
+- **get_output()** — return recent subprocess stdout/stderr from bounded buffer
+
+**Lifecycle states:** `STOPPED → STARTING → RUNNING → STOPPING → STOPPED`
+**Failure states:** `FAILED` (startup failure or unexpected exit)
+
+**Process supervision:**
+- stdout/stderr captured via async readers into a bounded 500-line buffer
+- Unexpected exit detected by a background wait task
+- No aggressive auto-restart (detection + manual restart only)
+- Duplicate start/stop calls are safe (idempotent)
+
+**Health checks:**
+- Process alive (subprocess not exited)
+- Port reachable (TCP connection to configured gateway port)
+- Combined status: HEALTHY, STARTING, STOPPED, FAILED, UNKNOWN
+
+**API routes:**
+- `GET /api/gateway/status` — process state snapshot
+- `GET /api/gateway/health` — health check result
+- `POST /api/gateway/start` — start the gateway
+- `POST /api/gateway/stop` — stop the gateway
+- `POST /api/gateway/restart` — restart the gateway
+- `GET /api/gateway/logs` — recent subprocess output
+
+**Relationship to legacy gateway:**
+GatewayManager wraps `legacy/OpusGateway.py` as a subprocess. It does NOT
+import or modify the gateway's internals. The legacy gateway runs as-is;
+GatewayManager only manages its lifecycle. Later phases may replace or
+refactor the underlying gateway implementation.
+
 ## Migration Strategy
 
 Database schema changes are managed by Alembic:
@@ -202,10 +243,8 @@ databases.
 
 ## What Is Intentionally NOT Implemented Yet
 
-Phase 1.3 establishes the architecture/policy alignment only. The following
-are NOT implemented:
+Phase 2.1 implements GatewayManager only. The following are NOT implemented:
 
-- Gateway proxy logic (Phase 2)
 - Credential management (Phase 3)
 - Session management (Phase 4)
 - Usage monitoring (Phase 5)
