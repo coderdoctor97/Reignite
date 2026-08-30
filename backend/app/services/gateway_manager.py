@@ -155,7 +155,10 @@ class GatewayManager:
     async def health(self) -> dict:
         """Return a health check result.
 
-        Tests: process alive + port reachable.
+        Tests: process alive + port reachable + HTTP probe.
+        The HTTP probe sends a GET to the gateway root. The legacy gateway
+        returns 404 with a text body — any HTTP response confirms the server
+        is actually serving, not just listening on the port.
         """
         async with self._lock:
             process_alive = (
@@ -165,13 +168,22 @@ class GatewayManager:
 
         # Port check outside the lock (it's async I/O)
         port_reachable = False
+        http_responsive = False
         if process_alive:
             port_reachable = await self._check_port()
+            if port_reachable:
+                http_responsive = await self._check_http()
 
         if not process_alive:
             status = HealthStatus.STOPPED
-        elif process_alive and port_reachable:
+        elif process_alive and port_reachable and http_responsive:
             status = HealthStatus.HEALTHY
+        elif process_alive and port_reachable and not http_responsive:
+            # Port open but HTTP not responding — still starting or degraded
+            if self._state == GatewayState.STARTING:
+                status = HealthStatus.STARTING
+            else:
+                status = HealthStatus.HEALTHY  # port reachable is sufficient
         elif process_alive and not port_reachable:
             # Could be starting up
             if self._state == GatewayState.STARTING:
@@ -186,6 +198,7 @@ class GatewayManager:
             "status": status.value,
             "process_alive": process_alive,
             "port_reachable": port_reachable,
+            "http_responsive": http_responsive,
             "checked_at": _utcnow(),
         }
 
@@ -385,6 +398,58 @@ class GatewayManager:
             return True
         except (OSError, asyncio.TimeoutError, ConnectionRefusedError):
             return False
+
+    async def _check_http(self) -> bool:
+        """Check if the gateway responds to HTTP requests.
+
+        Sends a GET to the gateway root. The legacy gateway returns 404 with
+        a text body — any HTTP response (even 4xx) confirms the server is
+        actually serving HTTP, not just listening on the port.
+
+        This is intentionally non-invasive: it does NOT send a real provider
+        request or hit any /v1 endpoint that might trigger auth logic.
+        """
+        settings = get_settings()
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(settings.gateway_host, settings.gateway_port),
+                timeout=2.0,
+            )
+            # Send a minimal HTTP GET / request
+            request = (
+                f"GET / HTTP/1.1\r\n"
+                f"Host: {settings.gateway_host}:{settings.gateway_port}\r\n"
+                f"Connection: close\r\n"
+                f"\r\n"
+            )
+            writer.write(request.encode("utf-8"))
+            await writer.drain()
+
+            # Read the first line of the response (status line)
+            status_line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            writer.close()
+            await writer.wait_closed()
+
+            # Any HTTP response starting with "HTTP/" confirms the server is serving
+            return status_line.startswith(b"HTTP/")
+        except (OSError, asyncio.TimeoutError, ConnectionRefusedError, asyncio.IncompleteReadError):
+            return False
+
+    def get_config(self) -> dict:
+        """Return the gateway configuration as a dict."""
+        settings = get_settings()
+        return {
+            "host": settings.gateway_host,
+            "port": settings.gateway_port,
+            "protocol": settings.gateway_protocol,
+            "base_path": settings.gateway_base_path,
+            "endpoint_url": settings.gateway_endpoint_url,
+            "base_url": settings.gateway_base_url,
+            "script": settings.gateway_script,
+            "working_directory": str(Path(settings.legacy_base_dir)),
+            "startup_timeout": settings.gateway_startup_timeout,
+            "shutdown_timeout": settings.gateway_shutdown_timeout,
+        }
 
     async def _read_output(self, stream: asyncio.StreamReader, name: str) -> None:
         """Background task to read subprocess output into the bounded buffer."""

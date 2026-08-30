@@ -1,6 +1,9 @@
 """
 Tests for GatewayManager and gateway API routes.
 
+Phase 2.2: Tests for config endpoint, endpoint URL construction, HTTP health
+check, and the new response shapes.
+
 Uses a small local test server fixture instead of the real gateway.
 No real credentials or external API calls.
 """
@@ -25,6 +28,16 @@ import json
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/":
+            # Mimic the legacy gateway root response
+            body = b"Opus Gateway API Proxy - nothing here (use /v1...)"
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Server", "OpusGateway")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -58,6 +71,8 @@ def _configure_for_test(tmp_path, fake_gateway_script, monkeypatch):
     monkeypatch.setenv("GCC_DATABASE_PATH", db_path)
     monkeypatch.setenv("GCC_LEGACY_BASE_DIR", str(fake_gateway_script.parent))
     monkeypatch.setenv("GCC_GATEWAY_PORT", "15800")
+    monkeypatch.setenv("GCC_GATEWAY_PROTOCOL", "http")
+    monkeypatch.setenv("GCC_GATEWAY_BASE_PATH", "/v1")
     monkeypatch.setenv("GCC_GATEWAY_STARTUP_TIMEOUT", "5.0")
     monkeypatch.setenv("GCC_GATEWAY_SHUTDOWN_TIMEOUT", "3.0")
 
@@ -113,21 +128,21 @@ async def test_start_gateway(client):
     assert response.status_code == 200
     data = response.json()
     assert data["success"] is True
-    assert data["status"]["state"] == "running"
-    assert data["status"]["pid"] is not None
+    assert data["status"]["process"]["state"] == "running"
+    assert data["status"]["process"]["pid"] is not None
 
 
 @pytest.mark.asyncio
 async def test_duplicate_start_protection(client):
     """Calling start twice should not spawn duplicate processes."""
     r1 = await client.post("/api/gateway/start")
-    pid1 = r1.json()["status"]["pid"]
+    pid1 = r1.json()["status"]["process"]["pid"]
 
     r2 = await client.post("/api/gateway/start")
-    pid2 = r2.json()["status"]["pid"]
+    pid2 = r2.json()["status"]["process"]["pid"]
 
     assert pid1 == pid2
-    assert r2.json()["message"] == "Gateway already running (PID {})".format(pid1) or r2.json()["success"] is True
+    assert r2.json()["success"] is True
 
 
 @pytest.mark.asyncio
@@ -139,8 +154,8 @@ async def test_stop_gateway(client):
     assert response.status_code == 200
     data = response.json()
     assert data["success"] is True
-    assert data["status"]["state"] == "stopped"
-    assert data["status"]["pid"] is None
+    assert data["status"]["process"]["state"] == "stopped"
+    assert data["status"]["process"]["pid"] is None
 
 
 @pytest.mark.asyncio
@@ -150,23 +165,23 @@ async def test_duplicate_stop_safety(client):
     assert response.status_code == 200
     data = response.json()
     assert data["success"] is True
-    assert data["status"]["state"] == "stopped"
+    assert data["status"]["process"]["state"] == "stopped"
 
 
 @pytest.mark.asyncio
 async def test_restart_gateway(client):
     """Restarting should stop then start, returning a new PID."""
     r1 = await client.post("/api/gateway/start")
-    pid1 = r1.json()["status"]["pid"]
+    pid1 = r1.json()["status"]["process"]["pid"]
 
     r2 = await client.post("/api/gateway/restart")
     assert r2.status_code == 200
     data = r2.json()
     assert data["success"] is True
-    assert data["status"]["state"] == "running"
-    assert data["status"]["pid"] is not None
+    assert data["status"]["process"]["state"] == "running"
+    assert data["status"]["process"]["pid"] is not None
     # PID should be different after restart
-    assert data["status"]["pid"] != pid1
+    assert data["status"]["process"]["pid"] != pid1
 
 
 @pytest.mark.asyncio
@@ -175,8 +190,8 @@ async def test_status_when_stopped(client):
     response = await client.get("/api/gateway/status")
     assert response.status_code == 200
     data = response.json()
-    assert data["state"] == "stopped"
-    assert data["pid"] is None
+    assert data["process"]["state"] == "stopped"
+    assert data["process"]["pid"] is None
 
 
 @pytest.mark.asyncio
@@ -187,10 +202,10 @@ async def test_status_when_running(client):
     response = await client.get("/api/gateway/status")
     assert response.status_code == 200
     data = response.json()
-    assert data["state"] == "running"
-    assert data["pid"] is not None
-    assert data["uptime_seconds"] is not None
-    assert data["uptime_seconds"] >= 0
+    assert data["process"]["state"] == "running"
+    assert data["process"]["pid"] is not None
+    assert data["process"]["uptime_seconds"] is not None
+    assert data["process"]["uptime_seconds"] >= 0
 
 
 @pytest.mark.asyncio
@@ -205,6 +220,7 @@ async def test_health_when_running(client):
     data = response.json()
     assert data["process_alive"] is True
     assert data["port_reachable"] is True
+    assert data["http_responsive"] is True
     assert data["status"] == "healthy"
 
 
@@ -217,6 +233,7 @@ async def test_health_when_stopped(client):
     assert data["status"] == "stopped"
     assert data["process_alive"] is False
     assert data["port_reachable"] is False
+    assert data["http_responsive"] is False
 
 
 @pytest.mark.asyncio
@@ -305,13 +322,15 @@ async def test_gateway_logs_endpoint(client):
 
 @pytest.mark.asyncio
 async def test_api_status_endpoint(client):
-    """GET /api/gateway/status should return structured JSON."""
+    """GET /api/gateway/status should return structured JSON with process and endpoint."""
     response = await client.get("/api/gateway/status")
     assert response.status_code == 200
     data = response.json()
-    assert "state" in data
-    assert "pid" in data
-    assert "restart_count" in data
+    assert "process" in data
+    assert "endpoint" in data
+    assert "state" in data["process"]
+    assert "pid" in data["process"]
+    assert "restart_count" in data["process"]
 
 
 @pytest.mark.asyncio
@@ -323,6 +342,7 @@ async def test_api_health_endpoint(client):
     assert "status" in data
     assert "process_alive" in data
     assert "port_reachable" in data
+    assert "http_responsive" in data
     assert "checked_at" in data
 
 
@@ -337,10 +357,178 @@ async def test_no_secrets_in_responses(client):
     status_text = status.text.lower()
     assert "sk-" not in status_text
     assert "api_key" not in status_text
-    assert "session" not in status_text or "session" in status_text  # "session" is OK as a concept
 
     # Check logs
     logs = await client.get("/api/gateway/logs")
     logs_text = logs.text.lower()
     # The fake gateway doesn't output secrets, but verify the structure
     assert "lines" in logs.json()
+
+
+# ── Phase 2.2: Configuration and Endpoint Tests ──────────────────
+
+@pytest.mark.asyncio
+async def test_config_endpoint(client):
+    """GET /api/gateway/config should return the gateway configuration."""
+    response = await client.get("/api/gateway/config")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["host"] == "127.0.0.1"
+    assert data["port"] == 15800
+    assert data["protocol"] == "http"
+    assert data["base_path"] == "/v1"
+    assert data["endpoint_url"] == "http://127.0.0.1:15800/v1"
+    assert data["base_url"] == "http://127.0.0.1:15800"
+    assert data["script"] == "OpusGateway.py"
+    assert "startup_timeout" in data
+    assert "shutdown_timeout" in data
+
+
+@pytest.mark.asyncio
+async def test_endpoint_url_construction(client):
+    """Endpoint URL should be constructed from protocol, host, port, and base_path."""
+    response = await client.get("/api/gateway/config")
+    data = response.json()
+    expected = f"{data['protocol']}://{data['host']}:{data['port']}{data['base_path']}"
+    assert data["endpoint_url"] == expected
+
+
+@pytest.mark.asyncio
+async def test_status_contains_endpoint_info(client):
+    """Status response should include endpoint information."""
+    response = await client.get("/api/gateway/status")
+    data = response.json()
+    assert "endpoint" in data
+    endpoint = data["endpoint"]
+    assert "host" in endpoint
+    assert "port" in endpoint
+    assert "protocol" in endpoint
+    assert "base_path" in endpoint
+    assert "url" in endpoint
+    assert "base_url" in endpoint
+    assert endpoint["url"] == "http://127.0.0.1:15800/v1"
+
+
+@pytest.mark.asyncio
+async def test_status_process_info(client):
+    """Status response should have process info in a nested object."""
+    response = await client.get("/api/gateway/status")
+    data = response.json()
+    assert "process" in data
+    process = data["process"]
+    assert "state" in process
+    assert "pid" in process
+    assert "uptime_seconds" in process
+    assert "restart_count" in process
+    assert "last_exit_code" in process
+    assert "last_error" in process
+    assert "start_time" in process
+    assert "stop_time" in process
+
+
+@pytest.mark.asyncio
+async def test_action_response_shape(client):
+    """Action responses should include success, message, and nested status."""
+    response = await client.post("/api/gateway/start")
+    data = response.json()
+    assert "success" in data
+    assert "message" in data
+    assert "status" in data
+    assert "process" in data["status"]
+    assert "endpoint" in data["status"]
+
+
+@pytest.mark.asyncio
+async def test_http_health_check(client):
+    """HTTP health check should detect the fake gateway's HTTP response."""
+    await client.post("/api/gateway/start")
+    await asyncio.sleep(0.5)
+
+    from app.services.gateway_manager import get_gateway_manager
+    manager = get_gateway_manager()
+
+    # The fake gateway responds to GET / with 404 — that's still HTTP responsive
+    http_ok = await manager._check_http()
+    assert http_ok is True
+
+
+@pytest.mark.asyncio
+async def test_http_health_check_when_stopped(client):
+    """HTTP health check should return False when gateway is not running."""
+    from app.services.gateway_manager import get_gateway_manager
+    manager = get_gateway_manager()
+
+    http_ok = await manager._check_http()
+    assert http_ok is False
+
+
+@pytest.mark.asyncio
+async def test_get_config_method(client):
+    """GatewayManager.get_config() should return a dict with all config fields."""
+    from app.services.gateway_manager import get_gateway_manager
+    manager = get_gateway_manager()
+    config = manager.get_config()
+
+    assert isinstance(config, dict)
+    assert "host" in config
+    assert "port" in config
+    assert "protocol" in config
+    assert "base_path" in config
+    assert "endpoint_url" in config
+    assert "base_url" in config
+    assert "script" in config
+    assert "working_directory" in config
+    assert "startup_timeout" in config
+    assert "shutdown_timeout" in config
+
+
+@pytest.mark.asyncio
+async def test_endpoint_url_stable_across_states(client):
+    """Endpoint URL should be the same regardless of gateway state."""
+    # When stopped
+    r1 = await client.get("/api/gateway/status")
+    url1 = r1.json()["endpoint"]["url"]
+
+    # When running
+    await client.post("/api/gateway/start")
+    r2 = await client.get("/api/gateway/status")
+    url2 = r2.json()["endpoint"]["url"]
+
+    assert url1 == url2
+    assert url1 == "http://127.0.0.1:15800/v1"
+
+
+@pytest.mark.asyncio
+async def test_config_endpoint_independent_of_process(client):
+    """Config endpoint should work regardless of gateway state."""
+    # When stopped
+    r1 = await client.get("/api/gateway/config")
+    assert r1.status_code == 200
+    assert r1.json()["endpoint_url"] == "http://127.0.0.1:15800/v1"
+
+    # When running
+    await client.post("/api/gateway/start")
+    r2 = await client.get("/api/gateway/config")
+    assert r2.status_code == 200
+    assert r2.json()["endpoint_url"] == "http://127.0.0.1:15800/v1"
+
+
+@pytest.mark.asyncio
+async def test_health_includes_http_responsive_field(client):
+    """Health response should include http_responsive field."""
+    response = await client.get("/api/gateway/health")
+    data = response.json()
+    assert "http_responsive" in data
+    assert data["http_responsive"] is False  # not running
+
+
+@pytest.mark.asyncio
+async def test_health_http_responsive_when_running(client):
+    """Health should report http_responsive=True when gateway is serving HTTP."""
+    await client.post("/api/gateway/start")
+    await asyncio.sleep(0.5)
+
+    response = await client.get("/api/gateway/health")
+    data = response.json()
+    assert data["http_responsive"] is True
+    assert data["status"] == "healthy"

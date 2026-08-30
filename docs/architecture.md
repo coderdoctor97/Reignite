@@ -212,11 +212,15 @@ Adapters are called by services, never by the API layer or frontend directly.
 **Health checks:**
 - Process alive (subprocess not exited)
 - Port reachable (TCP connection to configured gateway port)
+- HTTP responsive (GET / returns any HTTP response — confirms the server is
+  actually serving, not just listening). The legacy gateway returns 404 with a
+  text body at the root, which is a safe, non-invasive probe.
 - Combined status: HEALTHY, STARTING, STOPPED, FAILED, UNKNOWN
 
 **API routes:**
-- `GET /api/gateway/status` — process state snapshot
-- `GET /api/gateway/health` — health check result
+- `GET /api/gateway/status` — process state + endpoint info
+- `GET /api/gateway/health` — health check result (process + port + HTTP)
+- `GET /api/gateway/config` — gateway configuration and endpoint contract
 - `POST /api/gateway/start` — start the gateway
 - `POST /api/gateway/stop` — stop the gateway
 - `POST /api/gateway/restart` — restart the gateway
@@ -241,9 +245,91 @@ For fresh databases, `init_database()` uses `create_all` which creates all
 tables from the current models. Alembic is used for upgrading existing
 databases.
 
+## Control Plane vs Data Plane
+
+The application has a deliberate separation between control plane and data plane.
+This is intentional for the current migration stage.
+
+### Control Plane (FastAPI backend)
+
+```
+React (frontend)
+    ↓ HTTP
+FastAPI (backend)
+    ↓ subprocess management
+GatewayManager
+    ↓ launches
+legacy/OpusGateway.py
+```
+
+The control plane handles:
+- Gateway lifecycle (start/stop/restart)
+- Health monitoring (process + port + HTTP probe)
+- Configuration management
+- Status reporting
+- Event recording
+
+### Data Plane (Legacy Gateway)
+
+```
+Client application
+    ↓ HTTP (OpenAI-compatible)
+legacy/OpusGateway.py (port 5800)
+    ↓ HTTPS (with auth replacement)
+Upstream provider
+```
+
+The data plane handles:
+- Request forwarding to the upstream provider
+- Authorization header replacement
+- Streaming response handling
+- Token usage tracking
+
+### Why This Separation
+
+The legacy gateway is the actual data-plane proxy. It handles real provider
+requests. The FastAPI backend is the control plane — it manages the gateway
+process but does NOT forward provider requests.
+
+This separation means:
+- The legacy gateway runs as-is without modification
+- The control plane can be developed and tested independently
+- Client applications connect to a stable local endpoint
+- The data plane can be rewritten later without changing the control plane
+
+**Do not collapse these into one service yet.** After the control plane and
+provider model are stable, we may decide whether the data plane should be
+rewritten. That decision belongs to a later phase.
+
+## Stable Endpoint Contract
+
+The gateway exposes a stable local endpoint:
+
+    http://<host>:<port><base_path>
+
+Default: `http://127.0.0.1:5800/v1`
+
+This endpoint is a **product contract**. Client applications should not need
+to change when:
+- Provider changes
+- Model changes
+- Credential changes
+- Session changes
+- Backend management changes
+
+The endpoint URL is constructed from configuration:
+- `gateway_protocol` (default: `http`)
+- `gateway_host` (default: `127.0.0.1`)
+- `gateway_port` (default: `5800`)
+- `gateway_base_path` (default: `/v1`)
+
+The `GET /api/gateway/config` endpoint returns the full configuration including
+the constructed endpoint URL. The frontend uses this to display the stable
+endpoint and provide a copy-to-clipboard action.
+
 ## What Is Intentionally NOT Implemented Yet
 
-Phase 2.1 implements GatewayManager only. The following are NOT implemented:
+Phase 2.2 implements GatewayManager and gateway configuration. The following are NOT implemented:
 
 - Credential management (Phase 3)
 - Session management (Phase 4)

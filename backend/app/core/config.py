@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     gateway_script: str = "OpusGateway.py"
     gateway_host: str = "127.0.0.1"
     gateway_port: int = 5800
+    gateway_protocol: str = "http"
+    gateway_base_path: str = "/v1"
     gateway_startup_timeout: float = 10.0
     gateway_shutdown_timeout: float = 5.0
 
@@ -64,6 +66,16 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         """Parse CORS_ORIGINS into a list."""
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def gateway_endpoint_url(self) -> str:
+        """Full URL for the local gateway endpoint (e.g. http://127.0.0.1:5800/v1)."""
+        return f"{self.gateway_protocol}://{self.gateway_host}:{self.gateway_port}{self.gateway_base_path}"
+
+    @property
+    def gateway_base_url(self) -> str:
+        """Base URL without the path (e.g. http://127.0.0.1:5800)."""
+        return f"{self.gateway_protocol}://{self.gateway_host}:{self.gateway_port}"
 
     @property
     def database_url(self) -> str:
