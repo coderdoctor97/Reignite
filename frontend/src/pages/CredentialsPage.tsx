@@ -1,7 +1,7 @@
 /**
- * Credentials — manual entry, validation, activation, replacement, health.
+ * Credentials — manual entry, validation, activation, replacement, health, monitoring.
  *
- * Phase 3.2: Health monitoring, validation scheduling, health indicators.
+ * Phase 3.3: Background monitoring status, warnings, manual run.
  * Monitor-first, user-controlled. No automatic rotation.
  */
 
@@ -58,6 +58,31 @@ type CredentialActionResponse = {
   credential: Credential;
 };
 
+type MonitorStatus = {
+  enabled: boolean;
+  running: boolean;
+  interval_seconds: number;
+  last_run: string | null;
+  last_success: string | null;
+  last_error: string | null;
+  credentials_checked: number;
+  checks_succeeded: number;
+  checks_failed: number;
+  total_cycles: number;
+  cycle_in_progress: boolean;
+};
+
+type MonitorRunResponse = {
+  success: boolean;
+  message: string;
+  cycle_in_progress: boolean;
+  credentials_checked: number;
+  checks_succeeded: number;
+  checks_failed: number;
+  health_changes: number;
+  cycle_number: number;
+};
+
 // ── Constants ──────────────────────────────────────────────────
 
 const STATE_LABELS: Record<string, string> = {
@@ -108,6 +133,23 @@ const HEALTH_COLORS: Record<string, string> = {
   unknown: 'var(--color-text-tertiary)',
 };
 
+// ── Helpers ────────────────────────────────────────────────────
+
+function timeAgo(dateStr: string | null): string {
+  if (!dateStr) return '—';
+  try {
+    const now = Date.now();
+    const then = new Date(dateStr).getTime();
+    const diff = Math.floor((now - then) / 1000);
+    if (diff < 60) return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return `${Math.floor(diff / 86400)}d ago`;
+  } catch {
+    return '—';
+  }
+}
+
 // ── Component ──────────────────────────────────────────────────
 
 export function CredentialsPage() {
@@ -115,6 +157,7 @@ export function CredentialsPage() {
   const [healthData, setHealthData] = useState<CredentialHealth[]>([]);
   const [healthSummary, setHealthSummary] = useState<Record<string, number>>({});
   const [activeCredential, setActiveCredential] = useState<Credential | null>(null);
+  const [monitorStatus, setMonitorStatus] = useState<MonitorStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -135,16 +178,20 @@ export function CredentialsPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [listResp, activeResp, healthResp] = await Promise.all([
+      const [listResp, activeResp, healthResp, monitorResp] = await Promise.all([
         api.get<CredentialListResponse>('/api/credentials'),
         api.get<Credential | null>('/api/credentials/active').catch(() => null),
         api.get<CredentialHealthListResponse>('/api/credentials/health').catch(() => null),
+        api.get<MonitorStatus>('/api/monitor/status').catch(() => null),
       ]);
       setCredentials(listResp.credentials);
       setActiveCredential(activeResp);
       if (healthResp) {
         setHealthData(healthResp.credentials);
         setHealthSummary(healthResp.summary);
+      }
+      if (monitorResp) {
+        setMonitorStatus(monitorResp);
       }
       setError(null);
     } catch (err: unknown) {
@@ -154,6 +201,8 @@ export function CredentialsPage() {
 
   useEffect(() => {
     fetchData();
+    const interval = setInterval(fetchData, 10000); // Refresh every 10s
+    return () => clearInterval(interval);
   }, [fetchData]);
 
   const clearMessages = () => {
@@ -260,6 +309,24 @@ export function CredentialsPage() {
     }
   };
 
+  const handleMonitorRun = async () => {
+    clearMessages();
+    setLoading(true);
+    try {
+      const resp = await api.post<MonitorRunResponse>('/api/monitor/run');
+      if (resp.cycle_in_progress) {
+        setSuccess('Monitor cycle already in progress');
+      } else {
+        setSuccess(`Monitor cycle completed: ${resp.credentials_checked} checked, ${resp.health_changes} health changes`);
+      }
+      await fetchData();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to run monitor');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const formatDate = (dateStr: string | null) => {
     if (!dateStr) return '—';
     try {
@@ -272,6 +339,9 @@ export function CredentialsPage() {
   const getHealthForCredential = (credentialId: string): CredentialHealth | undefined => {
     return healthData.find(h => h.credential_id === credentialId);
   };
+
+  // Find credentials with critical/warning health for warnings
+  const warningCredentials = healthData.filter(h => h.health === 'critical' || h.health === 'warning');
 
   return (
     <div className="page">
@@ -351,6 +421,88 @@ export function CredentialsPage() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Monitor status card */}
+      {monitorStatus && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--space-4)', marginBottom: 'var(--space-4)',
+          padding: 'var(--space-3) var(--space-4)',
+          background: 'var(--color-bg-surface)', border: '1px solid var(--color-border)',
+          borderRadius: 'var(--radius-lg)',
+          fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)',
+        }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)' }}>
+            <span style={{
+              width: 8, height: 8, borderRadius: '50%',
+              background: monitorStatus.running ? 'var(--color-success)' : 'var(--color-text-tertiary)',
+            }} />
+            <span style={{ color: 'var(--color-text-secondary)' }}>
+              Monitor: {monitorStatus.running ? 'Running' : 'Stopped'}
+            </span>
+          </span>
+          <span style={{ color: 'var(--color-text-tertiary)' }}>
+            Last check: {timeAgo(monitorStatus.last_run)}
+          </span>
+          <span style={{ color: 'var(--color-text-tertiary)' }}>
+            Interval: {monitorStatus.interval_seconds}s
+          </span>
+          <span style={{ color: 'var(--color-text-tertiary)' }}>
+            Checked: {monitorStatus.credentials_checked}
+          </span>
+          <span style={{ color: 'var(--color-text-tertiary)' }}>
+            Cycles: {monitorStatus.total_cycles}
+          </span>
+          <button
+            onClick={handleMonitorRun}
+            disabled={loading || monitorStatus.cycle_in_progress}
+            style={{
+              marginLeft: 'auto',
+              padding: 'var(--space-1) var(--space-3)',
+              background: 'var(--color-bg-overlay)',
+              color: 'var(--color-text-secondary)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              cursor: loading ? 'wait' : 'pointer',
+              opacity: (loading || monitorStatus.cycle_in_progress) ? 0.5 : 1,
+              fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)',
+            }}
+          >
+            {monitorStatus.cycle_in_progress ? 'Running...' : 'Run Now'}
+          </button>
+        </div>
+      )}
+
+      {/* Warning banner for critical/warning credentials */}
+      {warningCredentials.length > 0 && (
+        <div style={{
+          marginBottom: 'var(--space-4)',
+          padding: 'var(--space-3) var(--space-4)',
+          background: 'var(--color-warning-subtle)',
+          border: '1px solid var(--color-warning)',
+          borderRadius: 'var(--radius-lg)',
+        }}>
+          <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--color-warning)', marginBottom: 'var(--space-2)' }}>
+            ⚠ {warningCredentials.length} credential{warningCredentials.length !== 1 ? 's' : ''} require{warningCredentials.length === 1 ? 's' : ''} attention
+          </div>
+          {warningCredentials.map(h => (
+            <div key={h.credential_id} style={{
+              fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)',
+              color: 'var(--color-text-secondary)', marginBottom: 'var(--space-1)',
+            }}>
+              <span style={{ color: HEALTH_COLORS[h.health] }}>● {HEALTH_LABELS[h.health]}</span>
+              {' — '}
+              {h.key_masked || '—'} ({h.provider_id})
+              {h.last_validation_error && (
+                <span style={{ color: 'var(--color-error)' }}> — {h.last_validation_error}</span>
+              )}
+              {' — '}
+              <span style={{ color: 'var(--color-text-tertiary)' }}>
+                Recommended: Replace the credential and validate it.
+              </span>
+            </div>
+          ))}
         </div>
       )}
 

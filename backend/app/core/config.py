@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     credential_validation_interval: float = 3600.0  # seconds between validation checks (default: 1 hour)
     credential_validation_enabled: bool = True
 
+    # ── Credential monitor (background service) ─────────────────
+    credential_monitor_enabled: bool = True
+    credential_monitor_interval: float = 60.0  # seconds between monitor cycles (default: 60s)
+
     model_config = {
         "env_prefix": "GCC_",
         "env_file": str(_PROJECT_ROOT / ".env"),

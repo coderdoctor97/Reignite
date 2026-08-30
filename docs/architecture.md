@@ -490,6 +490,68 @@ via `GCC_CREDENTIAL_VALIDATION_INTERVAL` (default: 1 hour).
 **Important:** Monitoring never implies automatic replacement. The health
 manager detects issues and records events. The user must take action.
 
+### CredentialMonitor
+
+`CredentialMonitor` (`app/services/credential_monitor.py`) is the background
+monitoring service that periodically checks credentials due for validation.
+
+```
+CredentialMonitor (asyncio background task)
+           ↓
+    CredentialHealthManager
+           ↓
+    CredentialValidator
+           ↓
+    CredentialRepository
+```
+
+**Lifecycle:**
+- `start()` — launches an asyncio background task
+- `stop()` — cancels the task and waits for clean shutdown
+- `run_once()` — triggers a single monitoring cycle
+- `status()` — returns current monitor state and statistics
+
+**Scheduling:**
+- The monitor wakes every `credential_monitor_interval` seconds (default: 60s)
+- Each cycle calls `CredentialHealthManager.check_all_due_credentials()`
+- Only credentials with `next_validation_at <= now` are checked
+- The monitor interval is NOT the same as the validation interval
+
+**Non-overlapping cycles:**
+- If a cycle is still running when the next interval arrives, the new cycle is skipped
+- An asyncio lock prevents concurrent cycles
+- `run_once()` returns a clear status if a cycle is already in progress
+
+**Error resilience:**
+- Individual credential check failures don't stop the monitor
+- The monitor logs errors and continues to the next credential
+- Monitor-level errors are caught and the loop continues after a brief pause
+
+**Health change detection:**
+- The monitor tracks previous health states for each credential
+- When a health state changes between cycles, it emits a structured event
+- Event types: `credential.health_changed`, `credential.warning`, `credential.critical`
+- Duplicate events are suppressed (no repeated notifications for unchanged conditions)
+
+**FastAPI integration:**
+- Started during application lifespan when `credential_monitor_enabled == true`
+- Stopped cleanly during application shutdown
+- Monitor failures don't prevent the application from starting
+
+**API routes:**
+- `GET /api/monitor/status` — monitor status and statistics
+- `POST /api/monitor/run` — trigger a single monitoring cycle
+
+**Events emitted:**
+- `monitor.cycle_completed` — after each successful cycle
+- `monitor.error` — when a cycle fails
+- `credential.health_changed` — when a credential's health state changes
+- `credential.warning` — when a credential enters warning state
+- `credential.critical` — when a credential enters critical state
+
+**Important:** The monitor never automatically replaces credentials. It detects
+issues and records events. The user remains responsible for replacing credentials.
+
 ### Why Automatic Rotation Is Not Part of the Default System
 
 The legacy project included automatic credential rotation via `KeyBinder.py`

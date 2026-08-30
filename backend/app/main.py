@@ -6,6 +6,7 @@ It sets up:
 - CORS for the React frontend
 - API routes
 - Database lifecycle
+- Credential monitor lifecycle
 - Logging
 """
 
@@ -22,6 +23,7 @@ from app.storage.database import init_database, close_database
 from app.api.health import router as health_router
 from app.api.gateway import router as gateway_router
 from app.api.credentials import router as credentials_router
+from app.api.monitor import router as monitor_router
 
 
 @asynccontextmanager
@@ -38,10 +40,29 @@ async def lifespan(app: FastAPI):
     await init_database()
     logger.info("Database ready")
 
+    # Start credential monitor if enabled
+    monitor = None
+    if settings.credential_monitor_enabled:
+        try:
+            from app.services.credential_monitor import get_credential_monitor
+            monitor = get_credential_monitor()
+            await monitor.start()
+        except Exception as e:
+            logger.error("Failed to start credential monitor: %s", e)
+            # Don't prevent app from starting if monitor fails
+
     yield
 
     # Shutdown
     logger.info("Shutting down...")
+
+    # Stop credential monitor
+    if monitor is not None:
+        try:
+            await monitor.stop()
+        except Exception as e:
+            logger.error("Error stopping credential monitor: %s", e)
+
     await close_database()
     logger.info("Shutdown complete")
 
@@ -69,6 +90,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(gateway_router)
     app.include_router(credentials_router)
+    app.include_router(monitor_router)
 
     return app
 
