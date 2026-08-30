@@ -181,53 +181,22 @@ class CredentialManager:
     async def validate_credential(self, credential_id: str) -> dict:
         """Validate a credential.
 
-        Uses the provider-validation adapter abstraction. Currently,
-        without a provider registry, validation returns 'unknown' status.
-
-        The validation adapter pattern allows future provider-specific
-        implementations without changing the CredentialManager.
+        Delegates to CredentialHealthManager for the actual validation,
+        which uses the adapter abstraction and handles scheduling.
 
         Returns:
             Updated credential metadata dict.
         """
+        from app.services.credential_health_manager import get_credential_health_manager
+
+        health_mgr = get_credential_health_manager()
+        health = await health_mgr.check_credential(credential_id)
+
+        # Re-fetch the credential for the return value
         async with get_async_session() as session:
             row = await CredentialRepository.get_by_id(session, credential_id)
             if row is None:
                 raise ValueError(f"Credential not found: {credential_id}")
-
-            # Perform validation through the adapter abstraction
-            validation_result = await self._perform_validation(row)
-
-            # Update the credential record
-            now = _utcnow()
-            await CredentialRepository.update_fields(
-                session,
-                credential_id,
-                validation_status=validation_result["status"],
-                last_validated=now,
-                last_validation_error=validation_result.get("error"),
-            )
-
-            # Record event
-            await CredentialEventRepository.create(
-                session,
-                event_type="validated",
-                status="success" if validation_result["status"] == "valid" else "failed",
-                provider_id=row.provider_id,
-                credential_id=credential_id,
-                failure_reason=validation_result.get("error"),
-                details_json=f'{{"validation_status":"{validation_result["status"]}"}}',
-            )
-
-            await session.commit()
-
-            logger.info(
-                "Credential validated: id=%s status=%s",
-                credential_id, validation_result["status"],
-            )
-
-            # Re-fetch to get updated fields
-            row = await CredentialRepository.get_by_id(session, credential_id)
             return self._row_to_dict(row)
 
     async def activate_credential(self, credential_id: str) -> dict:
@@ -455,6 +424,7 @@ class CredentialManager:
             "validation_status": row.validation_status,
             "last_validated": row.last_validated,
             "last_validation_error": row.last_validation_error,
+            "next_validation_at": row.next_validation_at,
             "usage_input": row.usage_input,
             "usage_output": row.usage_output,
             "usage_total": row.usage_total,

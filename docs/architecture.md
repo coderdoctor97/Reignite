@@ -445,6 +445,51 @@ The adapter:
 - Reports failures clearly
 - The legacy gateway discovers changes on its own reload cycle (no restart)
 
+### CredentialHealthManager
+
+`CredentialHealthManager` (`app/services/credential_health_manager.py`) monitors
+credential health by running validations and tracking health states.
+
+**Operations:**
+- `check_credential(id)` — run validation on a single credential
+- `check_all_due_credentials()` — check all credentials whose validation is due
+- `get_health(id)` — get health summary without running validation
+- `get_all_health()` — get health summaries for all credentials
+
+**Validation flow:**
+1. Set `validation_status` to `pending`
+2. Invoke the validation adapter
+3. Update `validation_status` with the result
+4. Calculate `next_validation_at` based on configured interval
+5. Record events (with duplicate suppression)
+
+**Health states** (derived from validation status):
+- `healthy` — `validation_status == 'valid'`
+- `warning` — `validation_status` in (`unknown`, `unavailable`, `pending`) or validation overdue
+- `critical` — `validation_status` in (`invalid`, `expired`)
+- `unknown` — never validated, no validation possible
+
+**Validation adapter pattern:**
+The health manager uses a `CredentialValidator` protocol. Implementations
+validate a credential against a specific provider. The default validator
+(`DefaultCredentialValidator`) only checks if the secret exists in the
+store — it does NOT make external API calls.
+
+**Duplicate warning suppression:**
+When validation detects an issue (`invalid`, `expired`, `unavailable`),
+the health manager checks if an identical event was created recently
+(within 5 minutes). If so, the duplicate event is suppressed. This
+prevents warning spam from repeated health checks.
+
+**Scheduling:**
+Each credential has a `next_validation_at` timestamp. The
+`check_all_due_credentials()` method only checks credentials whose
+`next_validation_at <= now`. The validation interval is configurable
+via `GCC_CREDENTIAL_VALIDATION_INTERVAL` (default: 1 hour).
+
+**Important:** Monitoring never implies automatic replacement. The health
+manager detects issues and records events. The user must take action.
+
 ### Why Automatic Rotation Is Not Part of the Default System
 
 The legacy project included automatic credential rotation via `KeyBinder.py`

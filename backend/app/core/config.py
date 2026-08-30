@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     gateway_startup_timeout: float = 10.0
     gateway_shutdown_timeout: float = 5.0
 
+    # ── Credential health monitoring ─────────────────────────────
+    credential_validation_interval: float = 3600.0  # seconds between validation checks (default: 1 hour)
+    credential_validation_enabled: bool = True
+
     model_config = {
         "env_prefix": "GCC_",
         "env_file": str(_PROJECT_ROOT / ".env"),

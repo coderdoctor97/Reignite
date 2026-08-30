@@ -1,7 +1,7 @@
 /**
- * Credentials — manual entry, validation, activation, replacement.
+ * Credentials — manual entry, validation, activation, replacement, health.
  *
- * Phase 3.1: Functional credential management page.
+ * Phase 3.2: Health monitoring, validation scheduling, health indicators.
  * Monitor-first, user-controlled. No automatic rotation.
  */
 
@@ -19,6 +19,7 @@ type Credential = {
   validation_status: string;
   last_validated: string | null;
   last_validation_error: string | null;
+  next_validation_at: string | null;
   usage_input: number;
   usage_output: number;
   usage_total: number;
@@ -28,9 +29,27 @@ type Credential = {
   updated_at: string;
 };
 
+type CredentialHealth = {
+  credential_id: string;
+  provider_id: string;
+  key_masked: string | null;
+  state: string;
+  validation_status: string;
+  health: string;
+  last_validated: string | null;
+  next_validation_at: string | null;
+  last_validation_error: string | null;
+};
+
 type CredentialListResponse = {
   credentials: Credential[];
   total: number;
+};
+
+type CredentialHealthListResponse = {
+  credentials: CredentialHealth[];
+  total: number;
+  summary: Record<string, number>;
 };
 
 type CredentialActionResponse = {
@@ -62,6 +81,8 @@ const VALIDATION_LABELS: Record<string, string> = {
   invalid: 'Invalid',
   expired: 'Expired',
   unknown: 'Unknown',
+  pending: 'Pending',
+  unavailable: 'Unavailable',
 };
 
 const VALIDATION_COLORS: Record<string, string> = {
@@ -69,12 +90,30 @@ const VALIDATION_COLORS: Record<string, string> = {
   invalid: 'var(--color-error)',
   expired: 'var(--color-warning)',
   unknown: 'var(--color-text-tertiary)',
+  pending: 'var(--color-info)',
+  unavailable: 'var(--color-warning)',
+};
+
+const HEALTH_LABELS: Record<string, string> = {
+  healthy: 'Healthy',
+  warning: 'Warning',
+  critical: 'Critical',
+  unknown: 'Unknown',
+};
+
+const HEALTH_COLORS: Record<string, string> = {
+  healthy: 'var(--color-success)',
+  warning: 'var(--color-warning)',
+  critical: 'var(--color-error)',
+  unknown: 'var(--color-text-tertiary)',
 };
 
 // ── Component ──────────────────────────────────────────────────
 
 export function CredentialsPage() {
   const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [healthData, setHealthData] = useState<CredentialHealth[]>([]);
+  const [healthSummary, setHealthSummary] = useState<Record<string, number>>({});
   const [activeCredential, setActiveCredential] = useState<Credential | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -96,12 +135,17 @@ export function CredentialsPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [listResp, activeResp] = await Promise.all([
+      const [listResp, activeResp, healthResp] = await Promise.all([
         api.get<CredentialListResponse>('/api/credentials'),
         api.get<Credential | null>('/api/credentials/active').catch(() => null),
+        api.get<CredentialHealthListResponse>('/api/credentials/health').catch(() => null),
       ]);
       setCredentials(listResp.credentials);
       setActiveCredential(activeResp);
+      if (healthResp) {
+        setHealthData(healthResp.credentials);
+        setHealthSummary(healthResp.summary);
+      }
       setError(null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to fetch credentials');
@@ -225,6 +269,10 @@ export function CredentialsPage() {
     }
   };
 
+  const getHealthForCredential = (credentialId: string): CredentialHealth | undefined => {
+    return healthData.find(h => h.credential_id === credentialId);
+  };
+
   return (
     <div className="page">
       <h1 className="page-title">Credentials</h1>
@@ -303,6 +351,29 @@ export function CredentialsPage() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Health summary bar */}
+      {credentials.length > 0 && (
+        <div style={{
+          display: 'flex', gap: 'var(--space-4)', marginBottom: 'var(--space-4)',
+          padding: 'var(--space-3) var(--space-4)',
+          background: 'var(--color-bg-surface)', border: '1px solid var(--color-border)',
+          borderRadius: 'var(--radius-lg)',
+          fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)',
+        }}>
+          {(['healthy', 'warning', 'critical', 'unknown'] as const).map(state => (
+            <span key={state} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)' }}>
+              <span style={{
+                width: 8, height: 8, borderRadius: '50%',
+                background: HEALTH_COLORS[state],
+              }} />
+              <span style={{ color: 'var(--color-text-secondary)' }}>
+                {HEALTH_LABELS[state]}: {healthSummary[state] ?? 0}
+              </span>
+            </span>
+          ))}
         </div>
       )}
 
@@ -504,37 +575,55 @@ export function CredentialsPage() {
       )}
 
       {/* Active credential card */}
-      {activeCredential && (
-        <div style={{
-          padding: 'var(--space-4)', marginBottom: 'var(--space-4)',
-          border: '1px solid var(--color-success)', borderRadius: 'var(--radius-lg)',
-          background: 'var(--color-success-subtle)',
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-3)' }}>
-            <span style={{
-              width: 8, height: 8, borderRadius: '50%',
-              background: 'var(--color-success)',
-            }} />
-            <span style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--color-text-primary)' }}>
-              Active Credential
-            </span>
+      {activeCredential && (() => {
+        const health = getHealthForCredential(activeCredential.id);
+        return (
+          <div style={{
+            padding: 'var(--space-4)', marginBottom: 'var(--space-4)',
+            border: '1px solid var(--color-success)', borderRadius: 'var(--radius-lg)',
+            background: 'var(--color-success-subtle)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-3)' }}>
+              <span style={{
+                width: 8, height: 8, borderRadius: '50%',
+                background: 'var(--color-success)',
+              }} />
+              <span style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--color-text-primary)' }}>
+                Active Credential
+              </span>
+              {health && (
+                <span style={{
+                  fontSize: 'var(--text-xs)', padding: '1px 6px',
+                  borderRadius: 'var(--radius-sm)',
+                  background: `${HEALTH_COLORS[health.health]}20`,
+                  color: HEALTH_COLORS[health.health],
+                  fontFamily: 'var(--font-mono)',
+                }}>
+                  {HEALTH_LABELS[health.health]}
+                </span>
+              )}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 'var(--space-1) var(--space-4)', fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)' }}>
+              <span style={{ color: 'var(--color-text-tertiary)' }}>ID:</span>
+              <span style={{ color: 'var(--color-text-secondary)' }}>{activeCredential.id}</span>
+              <span style={{ color: 'var(--color-text-tertiary)' }}>Key:</span>
+              <span style={{ color: 'var(--color-text-secondary)' }}>{activeCredential.key_masked || '—'}</span>
+              <span style={{ color: 'var(--color-text-tertiary)' }}>Provider:</span>
+              <span style={{ color: 'var(--color-text-secondary)' }}>{activeCredential.provider_id}</span>
+              <span style={{ color: 'var(--color-text-tertiary)' }}>Validation:</span>
+              <span style={{ color: VALIDATION_COLORS[activeCredential.validation_status] }}>
+                {VALIDATION_LABELS[activeCredential.validation_status] || activeCredential.validation_status}
+              </span>
+              <span style={{ color: 'var(--color-text-tertiary)' }}>Last validated:</span>
+              <span style={{ color: 'var(--color-text-secondary)' }}>{formatDate(activeCredential.last_validated)}</span>
+              <span style={{ color: 'var(--color-text-tertiary)' }}>Next validation:</span>
+              <span style={{ color: 'var(--color-text-secondary)' }}>{formatDate(activeCredential.next_validation_at)}</span>
+              <span style={{ color: 'var(--color-text-tertiary)' }}>Activated:</span>
+              <span style={{ color: 'var(--color-text-secondary)' }}>{formatDate(activeCredential.activated_at)}</span>
+            </div>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 'var(--space-1) var(--space-4)', fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)' }}>
-            <span style={{ color: 'var(--color-text-tertiary)' }}>ID:</span>
-            <span style={{ color: 'var(--color-text-secondary)' }}>{activeCredential.id}</span>
-            <span style={{ color: 'var(--color-text-tertiary)' }}>Key:</span>
-            <span style={{ color: 'var(--color-text-secondary)' }}>{activeCredential.key_masked || '—'}</span>
-            <span style={{ color: 'var(--color-text-tertiary)' }}>Provider:</span>
-            <span style={{ color: 'var(--color-text-secondary)' }}>{activeCredential.provider_id}</span>
-            <span style={{ color: 'var(--color-text-tertiary)' }}>Validation:</span>
-            <span style={{ color: VALIDATION_COLORS[activeCredential.validation_status] }}>
-              {VALIDATION_LABELS[activeCredential.validation_status] || activeCredential.validation_status}
-            </span>
-            <span style={{ color: 'var(--color-text-tertiary)' }}>Activated:</span>
-            <span style={{ color: 'var(--color-text-secondary)' }}>{formatDate(activeCredential.activated_at)}</span>
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Credential list */}
       <div style={{
@@ -563,97 +652,114 @@ export function CredentialsPage() {
           </div>
         ) : (
           <div>
-            {credentials.map((cred) => (
-              <div key={cred.id} style={{
-                padding: 'var(--space-3) var(--space-4)',
-                borderBottom: '1px solid var(--color-border-subtle)',
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                gap: 'var(--space-4)',
-              }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-1)' }}>
-                    <span style={{
-                      width: 8, height: 8, borderRadius: '50%',
-                      background: STATE_COLORS[cred.state] || 'var(--color-text-tertiary)',
-                    }} />
-                    <span style={{
-                      fontFamily: 'var(--font-mono)', fontSize: 'var(--text-sm)',
-                      color: 'var(--color-text-primary)',
-                    }}>
-                      {cred.key_masked || '—'}
-                    </span>
-                    <span style={{
-                      fontSize: 'var(--text-xs)', padding: '1px 6px',
-                      borderRadius: 'var(--radius-sm)',
-                      background: cred.state === 'active' ? 'var(--color-success-subtle)' : 'var(--color-bg-overlay)',
-                      color: STATE_COLORS[cred.state],
-                      fontFamily: 'var(--font-mono)',
-                    }}>
-                      {STATE_LABELS[cred.state] || cred.state}
-                    </span>
+            {credentials.map((cred) => {
+              const health = getHealthForCredential(cred.id);
+              return (
+                <div key={cred.id} style={{
+                  padding: 'var(--space-3) var(--space-4)',
+                  borderBottom: '1px solid var(--color-border-subtle)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  gap: 'var(--space-4)',
+                }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-1)' }}>
+                      <span style={{
+                        width: 8, height: 8, borderRadius: '50%',
+                        background: STATE_COLORS[cred.state] || 'var(--color-text-tertiary)',
+                      }} />
+                      <span style={{
+                        fontFamily: 'var(--font-mono)', fontSize: 'var(--text-sm)',
+                        color: 'var(--color-text-primary)',
+                      }}>
+                        {cred.key_masked || '—'}
+                      </span>
+                      <span style={{
+                        fontSize: 'var(--text-xs)', padding: '1px 6px',
+                        borderRadius: 'var(--radius-sm)',
+                        background: cred.state === 'active' ? 'var(--color-success-subtle)' : 'var(--color-bg-overlay)',
+                        color: STATE_COLORS[cred.state],
+                        fontFamily: 'var(--font-mono)',
+                      }}>
+                        {STATE_LABELS[cred.state] || cred.state}
+                      </span>
+                      {health && (
+                        <span style={{
+                          fontSize: 'var(--text-xs)', padding: '1px 6px',
+                          borderRadius: 'var(--radius-sm)',
+                          background: `${HEALTH_COLORS[health.health]}20`,
+                          color: HEALTH_COLORS[health.health],
+                          fontFamily: 'var(--font-mono)',
+                        }}>
+                          {HEALTH_LABELS[health.health]}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', gap: 'var(--space-3)', fontSize: 'var(--text-xs)', color: 'var(--color-text-tertiary)', fontFamily: 'var(--font-mono)', flexWrap: 'wrap' }}>
+                      <span>Provider: {cred.provider_id}</span>
+                      <span>Validation: <span style={{ color: VALIDATION_COLORS[cred.validation_status] }}>{VALIDATION_LABELS[cred.validation_status]}</span></span>
+                      <span>Last checked: {formatDate(cred.last_validated)}</span>
+                      {cred.last_validation_error && (
+                        <span style={{ color: 'var(--color-error)' }}>Error: {cred.last_validation_error}</span>
+                      )}
+                    </div>
                   </div>
-                  <div style={{ display: 'flex', gap: 'var(--space-3)', fontSize: 'var(--text-xs)', color: 'var(--color-text-tertiary)', fontFamily: 'var(--font-mono)' }}>
-                    <span>Provider: {cred.provider_id}</span>
-                    <span>Validation: <span style={{ color: VALIDATION_COLORS[cred.validation_status] }}>{VALIDATION_LABELS[cred.validation_status]}</span></span>
-                    <span>Source: {cred.source}</span>
-                  </div>
-                </div>
-                <div style={{ display: 'flex', gap: 'var(--space-1)', flexShrink: 0 }}>
-                  <button
-                    onClick={() => handleValidate(cred.id)}
-                    disabled={loading}
-                    title="Validate"
-                    style={{
-                      padding: 'var(--space-1) var(--space-2)',
-                      background: 'var(--color-bg-overlay)',
-                      color: 'var(--color-text-secondary)',
-                      border: '1px solid var(--color-border)',
-                      borderRadius: 'var(--radius-sm)',
-                      cursor: loading ? 'wait' : 'pointer',
-                      fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)',
-                    }}
-                  >
-                    Validate
-                  </button>
-                  {cred.state !== 'active' && (
+                  <div style={{ display: 'flex', gap: 'var(--space-1)', flexShrink: 0 }}>
                     <button
-                      onClick={() => handleActivate(cred.id)}
+                      onClick={() => handleValidate(cred.id)}
                       disabled={loading}
-                      title="Activate"
+                      title="Validate"
                       style={{
                         padding: 'var(--space-1) var(--space-2)',
-                        background: 'var(--color-accent-subtle)',
-                        color: 'var(--color-accent)',
-                        border: '1px solid var(--color-accent)',
+                        background: 'var(--color-bg-overlay)',
+                        color: 'var(--color-text-secondary)',
+                        border: '1px solid var(--color-border)',
                         borderRadius: 'var(--radius-sm)',
                         cursor: loading ? 'wait' : 'pointer',
                         fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)',
                       }}
                     >
-                      Activate
+                      Validate
                     </button>
-                  )}
-                  {cred.state === 'active' && (
-                    <button
-                      onClick={() => handleDeactivate(cred.id)}
-                      disabled={loading}
-                      title="Deactivate"
-                      style={{
-                        padding: 'var(--space-1) var(--space-2)',
-                        background: 'var(--color-error-subtle)',
-                        color: 'var(--color-error)',
-                        border: '1px solid var(--color-error)',
-                        borderRadius: 'var(--radius-sm)',
-                        cursor: loading ? 'wait' : 'pointer',
-                        fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)',
-                      }}
-                    >
-                      Deactivate
-                    </button>
-                  )}
+                    {cred.state !== 'active' && (
+                      <button
+                        onClick={() => handleActivate(cred.id)}
+                        disabled={loading}
+                        title="Activate"
+                        style={{
+                          padding: 'var(--space-1) var(--space-2)',
+                          background: 'var(--color-accent-subtle)',
+                          color: 'var(--color-accent)',
+                          border: '1px solid var(--color-accent)',
+                          borderRadius: 'var(--radius-sm)',
+                          cursor: loading ? 'wait' : 'pointer',
+                          fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)',
+                        }}
+                      >
+                        Activate
+                      </button>
+                    )}
+                    {cred.state === 'active' && (
+                      <button
+                        onClick={() => handleDeactivate(cred.id)}
+                        disabled={loading}
+                        title="Deactivate"
+                        style={{
+                          padding: 'var(--space-1) var(--space-2)',
+                          background: 'var(--color-error-subtle)',
+                          color: 'var(--color-error)',
+                          border: '1px solid var(--color-error)',
+                          borderRadius: 'var(--radius-sm)',
+                          cursor: loading ? 'wait' : 'pointer',
+                          fontSize: 'var(--text-xs)', fontFamily: 'var(--font-mono)',
+                        }}
+                      >
+                        Deactivate
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

@@ -1,10 +1,12 @@
 """
-Credential API routes — manual entry, validation, activation, replacement.
+Credential API routes — manual entry, validation, activation, replacement, health.
 
 Endpoints:
     GET  /api/credentials                    — list all credentials
     GET  /api/credentials/active             — get the active credential
+    GET  /api/credentials/health             — health summary for all credentials
     GET  /api/credentials/{credential_id}    — get a single credential
+    GET  /api/credentials/{credential_id}/health — health summary for one credential
     POST /api/credentials                    — add a new credential
     POST /api/credentials/{credential_id}/validate   — validate a credential
     POST /api/credentials/{credential_id}/activate    — activate a credential
@@ -19,6 +21,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 from app.services.credential_manager import get_credential_manager
+from app.services.credential_health_manager import get_credential_health_manager
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 
@@ -50,6 +53,7 @@ class CredentialResponse(BaseModel):
     validation_status: str
     last_validated: Optional[str] = None
     last_validation_error: Optional[str] = None
+    next_validation_at: Optional[str] = None
     usage_input: int = 0
     usage_output: int = 0
     usage_total: int = 0
@@ -70,6 +74,26 @@ class CredentialActionResponse(BaseModel):
     success: bool
     message: str
     credential: CredentialResponse
+
+
+class CredentialHealthResponse(BaseModel):
+    """Health summary for a credential."""
+    credential_id: str
+    provider_id: str
+    key_masked: Optional[str] = None
+    state: str
+    validation_status: str
+    health: str
+    last_validated: Optional[str] = None
+    next_validation_at: Optional[str] = None
+    last_validation_error: Optional[str] = None
+
+
+class CredentialHealthListResponse(BaseModel):
+    """Health summaries for all credentials."""
+    credentials: list[CredentialHealthResponse]
+    total: int
+    summary: dict  # counts by health state
 
 
 # ── Routes ───────────────────────────────────────────────────────
@@ -95,6 +119,28 @@ async def get_active_credential(provider_id: Optional[str] = None):
     return CredentialResponse(**cred)
 
 
+@router.get("/health", response_model=CredentialHealthListResponse)
+async def get_all_credential_health():
+    """Get health summaries for all credentials.
+
+    Returns current health states without running new validations.
+    """
+    health_mgr = get_credential_health_manager()
+    health_list = await health_mgr.get_all_health()
+
+    # Build summary counts
+    summary = {"healthy": 0, "warning": 0, "critical": 0, "unknown": 0}
+    for h in health_list:
+        state = h.get("health", "unknown")
+        summary[state] = summary.get(state, 0) + 1
+
+    return CredentialHealthListResponse(
+        credentials=[CredentialHealthResponse(**h) for h in health_list],
+        total=len(health_list),
+        summary=summary,
+    )
+
+
 @router.get("/{credential_id}", response_model=CredentialResponse)
 async def get_credential(credential_id: str):
     """Get a single credential by ID. Returns safe metadata only."""
@@ -103,6 +149,17 @@ async def get_credential(credential_id: str):
     if cred is None:
         raise HTTPException(status_code=404, detail="Credential not found")
     return CredentialResponse(**cred)
+
+
+@router.get("/{credential_id}/health", response_model=CredentialHealthResponse)
+async def get_credential_health(credential_id: str):
+    """Get the health summary for a single credential."""
+    health_mgr = get_credential_health_manager()
+    try:
+        health = await health_mgr.get_health(credential_id)
+        return CredentialHealthResponse(**health)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.post("", response_model=CredentialResponse, status_code=201)
@@ -129,8 +186,12 @@ async def add_credential(request: AddCredentialRequest):
 async def validate_credential(credential_id: str):
     """Validate a credential.
 
-    Checks if the credential exists in the secret store.
-    Provider-specific validation will be added in future phases.
+    Runs validation through the health manager, which:
+    1. Sets validation_status to 'pending'
+    2. Invokes the validation adapter
+    3. Updates validation_status with the result
+    4. Calculates next_validation_at
+    5. Records events (with duplicate suppression)
     """
     manager = get_credential_manager()
     try:

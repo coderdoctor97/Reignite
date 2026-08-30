@@ -126,9 +126,10 @@ class CredentialRow(Base):
     secret_ref      = Column(String(255), nullable=True)  # reference into SecretStore
     source          = Column(String(32), nullable=False, default="manual")  # 'manual','provider-assisted'
     state           = Column(String(32), nullable=False, default="active")  # 'active','inactive','expired','invalid','revoked'
-    validation_status = Column(String(32), nullable=False, default="unknown")  # 'valid','invalid','expired','unknown'
+    validation_status = Column(String(32), nullable=False, default="unknown")  # 'valid','invalid','expired','unknown','pending','unavailable'
     last_validated  = Column(Text, nullable=True)
     last_validation_error = Column(Text, nullable=True)
+    next_validation_at = Column(Text, nullable=True)  # ISO timestamp for next scheduled validation
     usage_input     = Column(Integer, nullable=False, default=0)
     usage_output    = Column(Integer, nullable=False, default=0)
     usage_total     = Column(Integer, nullable=False, default=0)
