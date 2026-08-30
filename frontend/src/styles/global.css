@@ -1,0 +1,87 @@
+/*
+ * Gateway Control Center — Global Styles
+ *
+ * Minimal reset + base styles. Component-specific styles go in component files.
+ */
+
+@import './tokens.css';
+
+/* ── Reset ─────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--color-text-primary);
+  background-color: var(--color-bg-root);
+  min-height: 100dvh;
+}
+
+#root {
+  min-height: 100dvh;
+  display: flex;
+}
+
+a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+code, pre, kbd {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+/* ── Scrollbar (thin, dark) ────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-tertiary);
+}
+
+/* ── Focus ring ────────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* ── Selection ─────────────────────────────────────────────── */
+::selection {
+  background: var(--color-accent-subtle);
+  color: var(--color-text-primary);
+}

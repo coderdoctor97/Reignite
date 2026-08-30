@@ -1,0 +1,52 @@
+# ── Python ──────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.venv/
+venv/
+*.so
+
+# ── Node / Frontend ────────────────────────────────────────────
+node_modules/
+frontend/dist/
+.vite/
+
+# ── Database ───────────────────────────────────────────────────
+data/
+*.db
+*.db-journal
+*.db-wal
+
+# ── Environment ────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── IDE ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Testing ────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+coverage/
+
+# ── Logs ───────────────────────────────────────────────────────
+*.log
+
+# ── Electron (future) ──────────────────────────────────────────
+desktop/dist/
+desktop/out/
+legacy/active_key.txt
