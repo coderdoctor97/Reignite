@@ -310,3 +310,25 @@ Credential events and usage snapshots use SET NULL to preserve history.
 Primary keys are 12-character hex strings (UUID prefixes) rather than
 auto-incrementing integers. This avoids sequential ID enumeration and
 works well with the frontend's display needs.
+
+## Credential Lifecycle State vs Validation State
+
+These are two independent dimensions of credential health:
+
+**Lifecycle state** (`state` field) tracks whether the credential is in use:
+- `inactive` — stored but not in use (default for new credentials)
+- `active` — currently in use by the gateway
+- `expired` — past its validity period
+- `invalid` — rejected by the provider
+- `revoked` — manually revoked
+
+**Validation state** (`validation_status` field) tracks the result of the
+last validation attempt:
+- `unknown` — not yet validated (default for new credentials)
+- `valid` — confirmed working with the provider
+- `invalid` — rejected by the provider
+- `expired` — provider reports the credential has expired
+
+A credential can be `active` with `unknown` validation status (we're using
+it but haven't checked if it's still valid). These states are updated
+independently by different operations.

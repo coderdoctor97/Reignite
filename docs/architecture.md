@@ -327,9 +327,141 @@ The `GET /api/gateway/config` endpoint returns the full configuration including
 the constructed endpoint URL. The frontend uses this to display the stable
 endpoint and provide a copy-to-clipboard action.
 
+## Credential Management
+
+### CredentialManager
+
+`CredentialManager` (`app/services/credential_manager.py`) is the business-logic
+owner of credential state. It implements the monitor-first, user-controlled
+credential lifecycle:
+
+```
+MONITOR → DETECT → WARN → USER ACTION → VALIDATE → ACTIVATE → CONTINUE MONITORING
+```
+
+**Operations:**
+- `list_credentials()` — list all credentials (safe metadata only)
+- `get_credential(id)` — get a single credential by ID
+- `get_active_credential()` — get the currently active credential
+- `add_credential(value, provider_id)` — manually add a credential
+- `validate_credential(id)` — validate via adapter abstraction
+- `activate_credential(id)` — activate (deactivates previous)
+- `deactivate_credential(id)` — deactivate
+- `replace_credential(value, provider_id)` — explicit replacement workflow
+
+### SecretStore Boundary
+
+The database stores only:
+- `secret_ref` — a reference ID into the SecretStore
+- `key_masked` — masked display value (e.g., `************AB12`)
+
+Actual credential values are stored in the `SecretStore` abstraction
+(`app/core/secrets.py`). The current implementation is a `FileSecretStore`
+that writes secrets to individual files outside the database.
+
+**Credential values never appear in:**
+- API responses
+- Database plaintext fields
+- Logs or events
+- Frontend state after save
+- Subprocess arguments
+
+### Credential Lifecycle State
+
+A credential has a **lifecycle state** that tracks its position in the
+management workflow:
+
+| State | Description |
+|-------|-------------|
+| `inactive` | Stored but not in use (default for new credentials) |
+| `active` | Currently in use by the gateway |
+| `expired` | Past its validity period |
+| `invalid` | Rejected by the provider |
+| `revoked` | Manually revoked |
+
+### Validation State
+
+A credential also has a **validation state** that tracks the result of
+the last validation attempt:
+
+| State | Description |
+|-------|-------------|
+| `unknown` | Not yet validated (default for new credentials) |
+| `valid` | Confirmed working with the provider |
+| `invalid` | Rejected by the provider |
+| `expired` | Provider reports the credential has expired |
+
+**Important distinction:** Lifecycle state tracks whether the credential
+is in use. Validation state tracks whether it works. A credential can be
+`active` with `unknown` validation status (we're using it but haven't
+checked if it's still valid).
+
+### Validation Architecture
+
+Validation uses an adapter pattern. `CredentialManager._perform_validation()`
+delegates to a provider-specific adapter. Currently, without a provider
+registry, validation returns `unknown` status (the credential exists in
+the store but we can't verify it against the upstream provider).
+
+Future phases will implement provider-specific validation adapters:
+- API key validation: lightweight API call to verify the key
+- Session cookie validation: check if the session is still valid
+- OAuth token validation: check expiration
+
+### Manual Replacement Workflow
+
+Replacing a credential is an explicit user-initiated workflow:
+
+1. User clicks "Replace Credential" in the UI
+2. User enters the new credential value
+3. System adds the new credential
+4. System deactivates the current active credential
+5. System activates the new credential
+6. System records replacement events
+7. Legacy adapter writes new credential to `active_key.txt`
+8. Legacy gateway discovers the change on its next reload cycle
+
+The previous credential is **deactivated, not deleted**. It remains in
+the database for audit purposes.
+
+### Legacy Credential Compatibility Adapter
+
+`LegacyCredentialAdapter` (`app/adapters/legacy_credential_store.py`) bridges
+the new credential system with the legacy gateway:
+
+```
+CredentialManager
+       ↓
+LegacyCredentialAdapter
+       ↓
+active_key.txt (atomic write)
+       ↓
+legacy OpusGateway.py (reads every 3 seconds)
+```
+
+The adapter:
+- Writes the active credential to `active_key.txt` using atomic replacement
+- Never logs the credential value
+- Reports failures clearly
+- The legacy gateway discovers changes on its own reload cycle (no restart)
+
+### Why Automatic Rotation Is Not Part of the Default System
+
+The legacy project included automatic credential rotation via `KeyBinder.py`
+and `rotate_now.py`. These scripts:
+- Delete all existing keys on the provider dashboard
+- Create a new key
+- Write it to `active_key.txt`
+
+This approach is fragile, provider-specific, and destructive. The new system
+follows a monitor-first policy: detect issues, warn the user, and let the
+user decide what to do. Automatic rotation is a provider-specific capability
+that may be offered as an opt-in feature in future phases, but it is NOT
+the default behavior.
+
 ## What Is Intentionally NOT Implemented Yet
 
-Phase 2.2 implements GatewayManager and gateway configuration. The following are NOT implemented:
+Phase 3.1 implements CredentialManager and manual credential management. The following are NOT implemented:
 
 - Credential management (Phase 3)
 - Session management (Phase 4)

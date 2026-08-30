@@ -49,3 +49,4 @@ coverage/
 # ── Electron (future) ──────────────────────────────────────────
 desktop/dist/
 desktop/out/
+legacy/active_key.txt
