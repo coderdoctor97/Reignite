@@ -112,7 +112,7 @@ Services in `app/services/` contain all the real work:
 
 - `GatewayManager` — start/stop/restart the gateway process
 - `CredentialManager` — manual entry, validation, activation, health monitoring
-- `SessionManager` — manual replacement, validation, health monitoring
+- `SessionManager` — session manual entry, replacement, validation, activation, health (Phase 4.1)
 - `ProviderManager` — CRUD, health checks, capability declarations
 - `ModelManager` — model configuration, defaults, fallbacks
 - `UsageManager` — token usage tracking and threshold alerts
@@ -134,6 +134,7 @@ Repositories in `app/storage/repositories.py` provide clean data access:
 - `CredentialRepository` — credential metadata CRUD (secrets stored separately)
 - `SessionRepository` — session metadata CRUD (secrets stored separately)
 - `CredentialEventRepository` — credential lifecycle event persistence
+- `SessionEventRepository` — session lifecycle event persistence
 - `UsageRepository` — usage snapshot persistence
 - `SettingsRepository` — application settings CRUD
 - `EventRepository` — structured event persistence
@@ -165,8 +166,8 @@ secret storage. The `SecretStore` interface makes this a drop-in replacement.
 - WAL journal mode for concurrent read performance
 - Foreign keys enabled for relational integrity
 - Alembic for deterministic schema migrations
-- 9 tables: providers, models, credentials, sessions, credential_events,
-  usage_snapshots, settings, events, health_checks
+- 10 tables: providers, models, credentials, sessions, credential_events,
+  session_events, usage_snapshots, settings, events, health_checks
 
 **Why SQLite?**
 - Zero configuration — no database server to manage
@@ -445,6 +446,194 @@ The adapter:
 - Reports failures clearly
 - The legacy gateway discovers changes on its own reload cycle (no restart)
 
+## Session Management (Phase 4.1)
+
+### Sessions Are Not Credentials
+
+A **session** and an **API credential** are completely separate concepts:
+
+```
+Provider
+   ↓
+Session   — provider-side management access (dashboard cookie/token)
+   +
+Credential — API access (API key / bearer token)
+   +
+Model
+```
+
+- A credential is used for API access (the gateway data plane).
+- A session may be required by a provider for provider-side **management**
+  operations (e.g. listing/creating/deleting API keys on a dashboard).
+- Not every provider requires a session. The application never assumes
+  one-provider = one-session, nor that any provider has a session at all.
+  Multiple sessions per provider are supported; at most one session per
+  provider is `active` at a time (enforced by SessionManager).
+
+### SessionManager
+
+`SessionManager` (`app/services/session_manager.py`) is the business-logic
+owner of session state. Route handlers never contain session logic.
+
+**Operations:**
+- `list_sessions(provider_id?)` — list sessions (safe metadata only)
+- `get_session(id)` — get a single session
+- `get_active_session(provider_id?)` — active session lookup
+- `add_session(secret_value, provider_id, label?, source='manual')` — manual entry
+- `replace_session(secret_value, provider_id, label?, session_id?)` — manual replacement
+- `activate_session(id)` — activate (deactivates the provider's previous active session)
+- `deactivate_session(id)` — deactivate (preserves the record; there is no DELETE)
+- `validate_session(id)` — validate through the SessionValidator abstraction
+
+### Session Lifecycle State
+
+Tracks whether the session is in service:
+
+| State | Description |
+|-------|-------------|
+| `inactive` | Stored but not in use (default for new sessions) |
+| `active` | Currently the provider's active management session |
+| `expired` | Validation determined the session has expired |
+| `invalid` | Validation rejected the session |
+
+### Session Validation State
+
+Tracks what the last validation attempt determined:
+
+| State | Description |
+|-------|-------------|
+| `unknown` | Never validated, or provider validation unsupported (default) |
+| `valid` | Confirmed working |
+| `invalid` | Rejected |
+| `expired` | Reported expired |
+| `unavailable` | Validation could not run (e.g. endpoint down) |
+| `error` | The validator itself failed |
+
+Lifecycle and validation state are deliberately separate fields; health is
+derived from both and never persisted.
+
+### Session Health
+
+| Health | Meaning |
+|--------|---------|
+| `healthy` | validated and valid |
+| `warning` | validation unavailable/errored, or a scheduled validation is overdue |
+| `critical` | session invalid or expired |
+| `unknown` | never validated, or provider validation unsupported |
+
+The system never pretends to know something the adapter cannot determine:
+without a provider-specific validator, validation honestly reports
+`unknown` — a session is **never** reported valid merely because its secret
+exists in the SecretStore.
+
+### Session Validation Architecture
+
+Validation uses an adapter abstraction:
+
+```
+SessionManager
+     ↓
+SessionValidator (protocol)
+     ↓
+DefaultSessionValidator — returns 'unknown' (no provider adapter yet)
+Future provider-specific validators (Phase 4.2+)
+```
+
+`SessionValidationResult` supports `valid`, `invalid`, `expired`,
+`unavailable`, `unknown`, and `error`. Validation timing:
+- `last_validated` — when the last attempt ran
+- `next_validation_at` — computed from `GCC_SESSION_VALIDATION_INTERVAL`
+- manual "Validate Now" action in the UI
+
+There is **no aggressive polling** and **no automatic session renewal**. A
+later phase may let the background monitor call session validation, but
+renewal/refresh is never silent.
+
+### Session Manual Replacement Workflow
+
+Explicit user-initiated workflow:
+
+1. User clicks "Replace" on an existing session
+2. User enters the new session secret
+3. System stores the new session and validates it
+4. If validation passes (or honestly reports `unknown`), the new session
+   is activated and the previous session becomes `inactive`
+5. If validation reports `invalid`/`expired`, the new session is NOT
+   activated and the previous session is left untouched
+6. Audit events `replacement_requested` → `replacement_completed` are recorded
+
+The previous session is **deactivated, not deleted**, and replacement is
+duplicate-safe: repeated replacements each produce a new record, deactivate
+their predecessor, and always leave exactly one active session per provider.
+
+### SessionProviderAdapter (Legacy Compatibility Seam)
+
+`SessionProviderAdapter` (`app/adapters/session_provider_adapter.py`) is the
+only path by which a raw session secret may leave the SecretStore:
+
+```
+SessionManager → SecretStore
+                    ↑
+SessionProviderAdapter.get_active_session_secret(provider_id)
+                    ↓
+future provider-specific management adapter (Phase 4.2+)
+```
+
+A future provider-management adapter uses the value for one request and
+discards it. The legacy KeyBinder/pull scripts are NOT modified in this
+phase; they keep their own (hard-coded) session handling. See
+`docs/legacy-session-flow.md` for the full legacy analysis.
+
+### Session Secrets
+
+Session secrets follow the same SecretStore boundary as credentials:
+
+- Stored via `SecretStore`; SQLite holds only `secret_ref` + `session_masked`
+- Never in API responses, logs, events (`session_events` and `events`), or
+  frontend state after submission
+- Never placed in command-line arguments or subprocess environments
+- Validator error text is redacted defensively before it is persisted
+
+### Session Events
+
+Two complementary records exist:
+
+- `session_events` table — per-session audit trail (mirrors
+  `credential_events`): `created`, `imported_manually`, `validated`,
+  `activated`, `deactivated`, `invalid`, `expired`,
+  `replacement_requested`, `replacement_completed`, `warning`
+- `events` table — app-wide log entries with `session.*` types
+  (`session.created`, `session.activated`, `session.invalid`, ...)
+
+Event payloads contain only IDs and masked values — never secrets.
+
+### Session API
+
+| Method | Route | Purpose |
+|--------|-------|---------|
+| GET | `/api/sessions` | List sessions (optional `provider_id` filter) |
+| GET | `/api/sessions/health` | Health summaries + counts |
+| GET | `/api/sessions/active` | Active session (optional `provider_id`) |
+| GET | `/api/sessions/{id}` | Single session |
+| POST | `/api/sessions` | Add a session manually (201) |
+| POST | `/api/sessions/replace` | Replace an existing session |
+| POST | `/api/sessions/{id}/validate` | Validate now |
+| POST | `/api/sessions/{id}/activate` | Activate (409 if expired/invalid) |
+| POST | `/api/sessions/{id}/deactivate` | Deactivate |
+
+There is deliberately **no DELETE endpoint** — deactivation is preferred.
+
+### Why Automatic Session Renewal Is Not Implemented
+
+- Session renewal requires provider-specific login/refresh flows — exactly
+  the kind of provider-specific behavior that belongs in adapters added
+  later, not in the generic session system.
+- Silent renewal would violate the monitor-first, user-controlled policy.
+- The legacy scripts had no renewal either — they simply failed when the
+  cookie died. Phase 4.1 replaces that silent failure with clear detection
+  (validation states, health, "Session requires attention" UX) and a guided
+  manual replacement workflow.
+
 ### CredentialHealthManager
 
 `CredentialHealthManager` (`app/services/credential_health_manager.py`) monitors
@@ -568,10 +757,15 @@ the default behavior.
 
 ## What Is Intentionally NOT Implemented Yet
 
-Phase 3.1 implements CredentialManager and manual credential management. The following are NOT implemented:
+Phases 1–4.1 implement the Foundation, Gateway, Credential Management,
+Credential Health/Monitoring, and the Session Management Foundation.
+The following are NOT implemented:
 
-- Credential management (Phase 3)
-- Session management (Phase 4)
+- Automatic session renewal (provider-specific; Phase 4.2+ adapters only)
+- Provider-specific session validation adapters (Phase 4.2+)
+- Provider-side management operations (dashboard key listing/creation,
+  provider login automation, browser automation) — Phase 4.2+
+- Session validation integration with the background monitor (Phase 4.2)
 - Usage monitoring (Phase 5)
 - Provider system (Phase 6)
 - Model system (Phase 7)

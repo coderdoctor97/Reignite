@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     credential_monitor_enabled: bool = True
     credential_monitor_interval: float = 60.0  # seconds between monitor cycles (default: 60s)
 
+    # ── Session management ──────────────────────────────────────
+    # Seconds between session validation checks. Used to compute
+    # next_validation_at after each validation. No automatic session
+    # renewal is performed — validation is manual or monitor-driven.
+    session_validation_interval: float = 3600.0  # default: 1 hour
+    session_validation_enabled: bool = True
+
     model_config = {
         "env_prefix": "GCC_",
         "env_file": str(_PROJECT_ROOT / ".env"),

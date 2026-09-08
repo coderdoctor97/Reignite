@@ -23,6 +23,7 @@ from app.storage.database import init_database, close_database
 from app.api.health import router as health_router
 from app.api.gateway import router as gateway_router
 from app.api.credentials import router as credentials_router
+from app.api.sessions import router as sessions_router
 from app.api.monitor import router as monitor_router
 
 
@@ -90,6 +91,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(gateway_router)
     app.include_router(credentials_router)
+    app.include_router(sessions_router)
     app.include_router(monitor_router)
 
     return app

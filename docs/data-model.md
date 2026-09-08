@@ -63,12 +63,28 @@
        │           │              │
        │           │  id          │
        │           │  provider_id │
+       │           │  label       │
        │           │  session_mask│
        │           │  secret_ref  │
-       │           │  status      │
+       │           │  source      │
+       │           │  lifecycle   │
+       │           │  validation  │
        │           │  last_valid  │
+       │           │  next_valid  │
+       │           │  activated_at│
        │           │  created_at  │
-       │           └──────────────┘
+       │           └──────┬───────┘
+       │                  │
+       │                  └─1:N──┌──────────────────────┐
+       │                         │    SessionEvent      │
+       │                         │                      │
+       │                         │  event_type          │
+       │                         │  session_id          │
+       │                         │  provider_id         │
+       │                         │  status              │
+       │                         │  failure_reason      │
+       │                         │  created_at          │
+       │                         └──────────────────────┘
 ```
 
 ## Entities
@@ -157,24 +173,74 @@ points to the secret's location in the store.
 ### Session
 
 A session credential for provider dashboard access (e.g., web session cookie).
-Used for operations like key management that require dashboard authentication.
+Used for provider-side management operations like key management that require
+dashboard authentication.
 
 Sessions are NOT the same as API credentials. The application treats session
 state, API credential state, and provider configuration as separate concepts.
+Multiple sessions per provider are supported; at most one session per provider
+is `active` at a time (enforced by SessionManager, not by a DB constraint).
 
 | Field | Type | Description |
 |-------|------|-------------|
 | id | String(12) | Primary key |
 | provider_id | String(12) | FK → providers.id (CASCADE delete) |
-| session_masked | String(128) | Masked display value |
+| label | String(255) | Optional user-facing label |
+| session_masked | String(128) | Masked display value (e.g., `****…****8fK`) |
 | secret_ref | String(255) | Reference ID into the SecretStore |
-| status | String(32) | `valid`, `invalid`, `expired`, `unknown` |
+| source | String(32) | How the session was obtained: `manual` |
+| lifecycle_state | String(32) | `active`, `inactive`, `expired`, `invalid` |
+| validation_state | String(32) | `valid`, `invalid`, `expired`, `unknown`, `unavailable`, `error` |
 | last_validated | Text | ISO timestamp of last validation |
+| next_validation_at | Text | ISO timestamp for next scheduled validation |
 | last_validation_error | Text | Last validation error message |
-| last_successful_fetch | Text | ISO timestamp of last successful credential fetch |
+| last_successful_fetch | Text | ISO timestamp of last successful (valid) validation |
+| activated_at | Text | ISO timestamp when activated |
+| deactivated_at | Text | ISO timestamp when deactivated |
 | metadata_json | Text | Arbitrary JSON metadata |
 | created_at | Text | ISO timestamp |
 | updated_at | Text | ISO timestamp |
+
+**State model (Phase 4.1):** `lifecycle_state` tracks whether the session is
+in service; `validation_state` tracks what the last validation attempt
+determined. They are deliberately separate. Health (`healthy`, `warning`,
+`critical`, `unknown`) is derived from both and is never persisted.
+
+**Migration note:** the Phase 4.1 migration (`a3f1c5e8d2b9`) replaced the old
+`status` column with `lifecycle_state` + `validation_state`; legacy `status`
+values (`valid`/`invalid`/`expired`/`unknown`) mapped into `validation_state`.
+
+### SessionEvent
+
+A record of a session lifecycle event (mirrors CredentialEvent).
+Secrets are never placed in event payloads.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| id | String(12) | Primary key |
+| provider_id | String(12) | FK → providers.id (SET NULL on delete) |
+| session_id | String(12) | FK → sessions.id (SET NULL on delete) |
+| event_type | String(64) | Event type (indexed, see below) |
+| status | String(32) | `success`, `failed`, `timeout`, `skipped` |
+| failure_reason | Text | Why the event failed (if applicable) |
+| duration_ms | Integer | How long the operation took |
+| details_json | Text | Additional context (JSON) — IDs/masked values only |
+| created_at | Text | ISO timestamp |
+
+**Event types:**
+- `created` — session record created
+- `imported_manually` — user pasted a session secret
+- `validated` — session validated through the validator abstraction
+- `activated` — session set as active
+- `deactivated` — session deactivated
+- `invalid` — session rejected by validation
+- `expired` — session expired (detected by validation)
+- `replacement_requested` — user requested replacement
+- `replacement_completed` — new session activated after replacement
+- `warning` — session requires attention
+
+Session activity also appears in the generic `events` table with `session.*`
+event types (e.g., `session.created`, `session.activated`, `session.invalid`).
 
 ### CredentialEvent
 
@@ -241,7 +307,7 @@ Structured application event log.
 | Field | Type | Description |
 |-------|------|-------------|
 | id | Integer | Auto-increment primary key |
-| event_type | String(128) | Event type (indexed): `gateway.started`, `credential.warning`, etc. |
+| event_type | String(128) | Event type (indexed): `gateway.started`, `credential.warning`, `session.created`, etc. |
 | severity | String(16) | `debug`, `info`, `warn`, `error`, `critical` |
 | message | Text | Human-readable message |
 | details_json | Text | Additional context (JSON) |

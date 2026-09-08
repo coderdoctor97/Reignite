@@ -22,6 +22,7 @@ from app.storage.models import (
     CredentialRow,
     SessionRow,
     CredentialEventRow,
+    SessionEventRow,
     UsageSnapshotRow,
     SettingRow,
     EventRow,
@@ -246,7 +247,11 @@ class SessionRepository:
     """CRUD for sessions.
 
     Note: actual session values are NOT stored in the database.
-    Only secret_ref and session_masked are stored.
+    Only secret_ref (pointing to SecretStore) and session_masked are stored.
+
+    Multiple sessions per provider are supported; at most one session per
+    provider is 'active' at a time (enforced by SessionManager, not by
+    a database constraint).
     """
 
     @staticmethod
@@ -256,11 +261,15 @@ class SessionRepository:
         provider_id: str,
         session_masked: Optional[str] = None,
         secret_ref: Optional[str] = None,
+        label: Optional[str] = None,
+        source: str = "manual",
     ) -> SessionRow:
         row = SessionRow(
             provider_id=provider_id,
             session_masked=session_masked,
             secret_ref=secret_ref,
+            label=label,
+            source=source,
         )
         session.add(row)
         await session.flush()
@@ -275,6 +284,7 @@ class SessionRepository:
 
     @staticmethod
     async def get_by_provider(session: AsyncSession, provider_id: str) -> Optional[SessionRow]:
+        """Return the most recently created session for a provider."""
         result = await session.execute(
             select(SessionRow)
             .where(SessionRow.provider_id == provider_id)
@@ -282,6 +292,27 @@ class SessionRepository:
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_active(session: AsyncSession, provider_id: str) -> Optional[SessionRow]:
+        """Return the currently active session for a provider (if any)."""
+        result = await session.execute(
+            select(SessionRow)
+            .where(SessionRow.provider_id == provider_id)
+            .where(SessionRow.lifecycle_state == "active")
+            .order_by(SessionRow.activated_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def list_by_provider(session: AsyncSession, provider_id: str) -> list[SessionRow]:
+        result = await session.execute(
+            select(SessionRow)
+            .where(SessionRow.provider_id == provider_id)
+            .order_by(SessionRow.created_at.desc())
+        )
+        return list(result.scalars().all())
 
     @staticmethod
     async def list_all(session: AsyncSession) -> list[SessionRow]:
@@ -296,6 +327,68 @@ class SessionRepository:
             update(SessionRow).where(SessionRow.id == session_id).values(**fields)
         )
         return result.rowcount > 0
+
+
+# ─────────────────────────────────────────────────────────────────
+# Session Event Repository
+# ─────────────────────────────────────────────────────────────────
+
+class SessionEventRepository:
+    """CRUD for session lifecycle events."""
+
+    @staticmethod
+    async def create(
+        session: AsyncSession,
+        *,
+        event_type: str,
+        status: str,
+        provider_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        failure_reason: Optional[str] = None,
+        duration_ms: Optional[int] = None,
+        details_json: Optional[str] = None,
+    ) -> SessionEventRow:
+        row = SessionEventRow(
+            event_type=event_type,
+            status=status,
+            provider_id=provider_id,
+            session_id=session_id,
+            failure_reason=failure_reason,
+            duration_ms=duration_ms,
+            details_json=details_json,
+        )
+        session.add(row)
+        await session.flush()
+        return row
+
+    @staticmethod
+    async def list_recent(session: AsyncSession, limit: int = 50) -> list[SessionEventRow]:
+        result = await session.execute(
+            select(SessionEventRow)
+            .order_by(SessionEventRow.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def list_by_session(session: AsyncSession, session_id: str, limit: int = 50) -> list[SessionEventRow]:
+        result = await session.execute(
+            select(SessionEventRow)
+            .where(SessionEventRow.session_id == session_id)
+            .order_by(SessionEventRow.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def list_by_provider(session: AsyncSession, provider_id: str, limit: int = 50) -> list[SessionEventRow]:
+        result = await session.execute(
+            select(SessionEventRow)
+            .where(SessionEventRow.provider_id == provider_id)
+            .order_by(SessionEventRow.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
 
 
 # ─────────────────────────────────────────────────────────────────

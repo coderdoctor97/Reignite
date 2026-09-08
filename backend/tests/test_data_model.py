@@ -247,13 +247,16 @@ async def test_session_metadata_persistence(session, secret_store):
         provider_id=provider.id,
         session_masked="session=****c123",
         secret_ref=secret_ref,
+        label="dashboard",
     )
-    assert sess.status == "unknown"
+    assert sess.lifecycle_state == "inactive"
+    assert sess.validation_state == "unknown"
+    assert sess.source == "manual"
 
-    # Update status
-    await SessionRepository.update_fields(session, sess.id, status="valid")
+    # Update validation state (Phase 4.1 split: lifecycle ≠ validation)
+    await SessionRepository.update_fields(session, sess.id, validation_state="valid")
     fetched = await SessionRepository.get_by_id(session, sess.id)
-    assert fetched.status == "valid"
+    assert fetched.validation_state == "valid"
 
     # Get by provider
     by_provider = await SessionRepository.get_by_provider(session, provider.id)
