@@ -149,22 +149,39 @@ class CredentialRow(Base):
 class SessionRow(Base):
     """A session credential for provider dashboard access.
 
-    Used for operations like key management (list/create/delete keys)
-    that require a web session cookie or similar auth token.
+    Used for provider-side management operations (e.g., list/create/delete
+    API keys) that require a web session cookie or similar auth token.
+
+    A session is NOT an API credential — the two concepts are kept
+    completely separate (see CredentialRow).
 
     The actual session value is NOT stored here — only a reference
-    and masked display value.
+    (secret_ref) into the SecretStore and a masked display value.
+
+    State model (Phase 4.1):
+    - lifecycle_state: 'active','inactive','expired','invalid'
+    - validation_state: 'valid','invalid','expired','unknown','unavailable','error'
+
+    Lifecycle state and validation state are deliberately separate:
+    lifecycle says whether the session is in service; validation says
+    what the last validation attempt determined.
     """
     __tablename__ = "sessions"
 
     id              = Column(String(12), primary_key=True, default=_new_id)
     provider_id     = Column(String(12), ForeignKey("providers.id", ondelete="CASCADE"), nullable=False)
+    label           = Column(String(255), nullable=True)  # optional user-facing label
     session_masked  = Column(String(128), nullable=True)  # masked for display
     secret_ref      = Column(String(255), nullable=True)  # reference into SecretStore
-    status          = Column(String(32), nullable=False, default="unknown")  # 'valid','invalid','expired','unknown'
+    source          = Column(String(32), nullable=False, default="manual")  # 'manual', future: 'provider-assisted'
+    lifecycle_state = Column(String(32), nullable=False, default="inactive")  # 'active','inactive','expired','invalid'
+    validation_state = Column(String(32), nullable=False, default="unknown")  # 'valid','invalid','expired','unknown','unavailable','error'
     last_validated  = Column(Text, nullable=True)
+    next_validation_at = Column(Text, nullable=True)  # ISO timestamp for next scheduled validation
     last_validation_error = Column(Text, nullable=True)
     last_successful_fetch = Column(Text, nullable=True)
+    activated_at    = Column(Text, nullable=True)
+    deactivated_at  = Column(Text, nullable=True)
     metadata_json   = Column(Text, nullable=True)
     created_at      = Column(Text, nullable=False, default=_utcnow)
     updated_at      = Column(Text, nullable=False, default=_utcnow, onupdate=_utcnow)
@@ -200,6 +217,43 @@ class CredentialEventRow(Base):
     id                  = Column(String(12), primary_key=True, default=_new_id)
     provider_id         = Column(String(12), ForeignKey("providers.id", ondelete="SET NULL"), nullable=True)
     credential_id       = Column(String(12), ForeignKey("credentials.id", ondelete="SET NULL"), nullable=True)
+    event_type          = Column(String(64), nullable=False, index=True)  # see docstring
+    status              = Column(String(32), nullable=False)  # 'success','failed','timeout','skipped'
+    failure_reason      = Column(Text, nullable=True)
+    duration_ms         = Column(Integer, nullable=True)
+    details_json        = Column(Text, nullable=True)  # additional context
+    created_at          = Column(Text, nullable=False, default=_utcnow)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Session Event
+# ─────────────────────────────────────────────────────────────────
+
+class SessionEventRow(Base):
+    """A record of a session lifecycle event.
+
+    Mirrors CredentialEventRow. Event types:
+    - 'created': session record created
+    - 'imported_manually': user pasted a session secret
+    - 'validated': session validated through the validator abstraction
+    - 'activated': session set as active
+    - 'deactivated': session deactivated
+    - 'invalid': session rejected by validation
+    - 'expired': session expired (detected by validation)
+    - 'replacement_requested': user requested replacement
+    - 'replacement_completed': new session activated after replacement
+    - 'warning': session requires attention
+
+    Status: 'success', 'failed', 'timeout', 'skipped'
+
+    Secrets are NEVER placed in event payloads — only session IDs,
+    provider IDs, and masked values.
+    """
+    __tablename__ = "session_events"
+
+    id                  = Column(String(12), primary_key=True, default=_new_id)
+    provider_id         = Column(String(12), ForeignKey("providers.id", ondelete="SET NULL"), nullable=True)
+    session_id          = Column(String(12), ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True)
     event_type          = Column(String(64), nullable=False, index=True)  # see docstring
     status              = Column(String(32), nullable=False)  # 'success','failed','timeout','skipped'
     failure_reason      = Column(Text, nullable=True)

@@ -3,12 +3,16 @@
 ## Overview
 
 The Gateway Control Center is a local web application that manages an AI API
-gateway. It is primarily a **Gateway + Credential Monitor + Management Center**.
-It is NOT primarily an automatic credential-rotation system.
+gateway. It is a **Gateway + Multi-Provider Router + Credential Monitor +
+Management Center**. It is NOT an automatic credential-rotation system.
 
-The application provides a stable local endpoint for AI clients while monitoring
-credential health, tracking usage, and helping the user manage credentials,
-sessions, providers, and models.
+The application provides a stable local endpoint for AI clients (OpenAI,
+Anthropic, and Responses API formats) while monitoring credential and
+session health, tracking usage, and helping the user manage credentials,
+sessions, providers, and models. A built-in Apply-Config feature writes the
+gateway endpoint configuration into installed CLI agents and IDE
+extensions (Claude Code, Claude Desktop, Codex, Grok Build, Cline, Roo
+Code) on explicit user action only.
 
 ## Core Policy
 
@@ -110,15 +114,15 @@ logic, database queries, or external API calls directly.
 
 Services in `app/services/` contain all the real work:
 
-- `GatewayManager` — start/stop/restart the gateway process
+- `GatewayService` — the first-party data plane (routing, translation, usage accounting, runtime toggle)
 - `CredentialManager` — manual entry, validation, activation, health monitoring
-- `SessionManager` — manual replacement, validation, health monitoring
-- `ProviderManager` — CRUD, health checks, capability declarations
+- `SessionManager` — session manual entry, replacement, validation, activation, health
+- `ProviderManager` — provider CRUD, capability declarations, health probes, model discovery, OpenRouter quick-add
 - `ModelManager` — model configuration, defaults, fallbacks
-- `UsageManager` — token usage tracking and threshold alerts
-- `HealthManager` — health checks for gateway, providers, sessions, credentials
-- `ProcessManager` — subprocess lifecycle management
-- `LogManager` — structured event logging
+- `UsageManager` — token usage tracking, snapshots, threshold alerts
+- `ConfigApplier` — apply/revert gateway config into external agents (Claude Code, Codex, Cline, Roo Code, ...)
+- `ProviderWorkflowService` — user-initiated provider key workflows (list/create/revoke/import)
+- `CredentialMonitor` — background monitor (credentials + sessions + usage snapshots)
 
 Services depend on the storage layer and adapters, never on the API layer
 or the frontend.
@@ -134,6 +138,7 @@ Repositories in `app/storage/repositories.py` provide clean data access:
 - `CredentialRepository` — credential metadata CRUD (secrets stored separately)
 - `SessionRepository` — session metadata CRUD (secrets stored separately)
 - `CredentialEventRepository` — credential lifecycle event persistence
+- `SessionEventRepository` — session lifecycle event persistence
 - `UsageRepository` — usage snapshot persistence
 - `SettingsRepository` — application settings CRUD
 - `EventRepository` — structured event persistence
@@ -165,8 +170,8 @@ secret storage. The `SecretStore` interface makes this a drop-in replacement.
 - WAL journal mode for concurrent read performance
 - Foreign keys enabled for relational integrity
 - Alembic for deterministic schema migrations
-- 9 tables: providers, models, credentials, sessions, credential_events,
-  usage_snapshots, settings, events, health_checks
+- 10 tables: providers, models, credentials, sessions, credential_events,
+  session_events, usage_snapshots, settings, events, health_checks
 
 **Why SQLite?**
 - Zero configuration — no database server to manage
@@ -187,50 +192,39 @@ Adapters in `app/adapters/` encapsulate communication with external systems:
 
 Adapters are called by services, never by the API layer or frontend directly.
 
-### 8. GatewayManager
+### 8. GatewayService (first-party data plane)
 
-**Responsibility:** Lifecycle management of the gateway subprocess.
+**Responsibility:** The unified AI gateway, served in-process by the backend
+under `/v1`.
 
-`GatewayManager` (`app/services/gateway_manager.py`) owns the gateway process:
+`GatewayService` (`app/services/gateway_service.py`) replaces the legacy
+subprocess gateway with a first-party data plane:
 
-- **start()** — launch the gateway script as a subprocess, wait for port readiness
-- **stop()** — graceful terminate, force-kill on timeout
-- **restart()** — stop + start
-- **status()** — return process state (PID, uptime, restart count, exit code)
-- **health()** — test process liveness AND port reachability
-- **get_output()** — return recent subprocess stdout/stderr from bounded buffer
+- **`GET /v1/models`** — OpenAI-style model list from the registry
+- **`POST /v1/chat/completions`** — OpenAI Chat Completions (stream + non-stream)
+- **`POST /v1/messages`** — Anthropic Messages API (stream + non-stream)
+- **`POST /v1/responses`** — OpenAI Responses API (stream + non-stream)
 
-**Lifecycle states:** `STOPPED → STARTING → RUNNING → STOPPING → STOPPED`
-**Failure states:** `FAILED` (startup failure or unexpected exit)
+Routing and protocol adaptation:
+- The requested model is matched against the model registry and routed to
+  its provider; `model: "auto"` resolves to the provider's default model.
+- The provider's ACTIVE credential is fetched from the SecretStore and sent
+  upstream (Bearer for OpenAI-compatible, `x-api-key` for Anthropic).
+- Requests pass through unchanged when the client speaks the provider's
+  native protocol, and are translated otherwise (OpenAI ↔ Anthropic,
+  Responses → either). Streaming is preserved end-to-end via SSE.
+- Token usage is counted per request and applied to the credential's usage
+  counters; `UsageManager` snapshots those counters periodically.
 
-**Process supervision:**
-- stdout/stderr captured via async readers into a bounded 500-line buffer
-- Unexpected exit detected by a background wait task
-- No aggressive auto-restart (detection + manual restart only)
-- Duplicate start/stop calls are safe (idempotent)
+Auth model: local single-user trust — any bearer token is accepted unless
+`GCC_GATEWAY_API_KEY` is set. Start/stop is a runtime toggle; when stopped,
+`/v1` returns 503.
 
-**Health checks:**
-- Process alive (subprocess not exited)
-- Port reachable (TCP connection to configured gateway port)
-- HTTP responsive (GET / returns any HTTP response — confirms the server is
-  actually serving, not just listening). The legacy gateway returns 404 with a
-  text body at the root, which is a safe, non-invasive probe.
-- Combined status: HEALTHY, STARTING, STOPPED, FAILED, UNKNOWN
-
-**API routes:**
-- `GET /api/gateway/status` — process state + endpoint info
-- `GET /api/gateway/health` — health check result (process + port + HTTP)
-- `GET /api/gateway/config` — gateway configuration and endpoint contract
-- `POST /api/gateway/start` — start the gateway
-- `POST /api/gateway/stop` — stop the gateway
-- `POST /api/gateway/restart` — restart the gateway
-- `GET /api/gateway/logs` — recent subprocess output
-
-**Relationship to legacy gateway:**
-GatewayManager wraps `legacy/OpusGateway.py` as a subprocess. It does NOT
-import or modify the gateway's internals. The legacy gateway runs as-is;
-GatewayManager only manages its lifecycle. Later phases may replace or
-refactor the underlying gateway implementation.
+**API routes (control):**
+- `GET /api/gateway/status` — state, stats, endpoint contract
+- `GET /api/gateway/health` — data plane liveness
+- `GET /api/gateway/config` — configuration + stable endpoint URL
+- `POST /api/gateway/start|stop|restart` — runtime toggle
 
 ## Migration Strategy
 
@@ -247,59 +241,53 @@ databases.
 
 ## Control Plane vs Data Plane
 
-The application has a deliberate separation between control plane and data plane.
-This is intentional for the current migration stage.
+The application keeps a clear separation between control plane and data
+plane — both first-party now, running in one process.
 
-### Control Plane (FastAPI backend)
+### Control Plane (FastAPI `/api`)
 
 ```
 React (frontend)
     ↓ HTTP
-FastAPI (backend)
-    ↓ subprocess management
-GatewayManager
-    ↓ launches
-legacy/OpusGateway.py
+FastAPI /api/*  (management + monitoring)
+    ↓
+services: GatewayService, CredentialManager, SessionManager,
+          ProviderManager, ModelManager, UsageManager, ConfigApplier,
+          Monitor
+    ↓
+SQLite + SecretStore
 ```
 
 The control plane handles:
-- Gateway lifecycle (start/stop/restart)
-- Health monitoring (process + port + HTTP probe)
-- Configuration management
-- Status reporting
-- Event recording
+- Gateway lifecycle (runtime enable/disable), stats
+- Provider / model / credential / session management
+- Health monitoring, usage tracking, structured events
+- Apply-Config for external agents
 
-### Data Plane (Legacy Gateway)
+### Data Plane (first-party gateway `/v1`)
 
 ```
-Client application
-    ↓ HTTP (OpenAI-compatible)
-legacy/OpusGateway.py (port 5800)
-    ↓ HTTPS (with auth replacement)
-Upstream provider
+Client application (OpenAI / Anthropic / Responses format)
+    ↓ HTTP
+GatewayService  (/v1, in-process)
+    ↓ protocol routing + translation
+Upstream providers (OpenAI-compatible / Anthropic)
 ```
 
 The data plane handles:
-- Request forwarding to the upstream provider
-- Authorization header replacement
-- Streaming response handling
-- Token usage tracking
+- Model routing via the registry
+- Protocol passthrough and OpenAI ↔ Anthropic translation
+- Streaming (SSE) preservation
+- Token usage accounting per credential
 
-### Why This Separation
+### Why This Shape
 
-The legacy gateway is the actual data-plane proxy. It handles real provider
-requests. The FastAPI backend is the control plane — it manages the gateway
-process but does NOT forward provider requests.
-
-This separation means:
-- The legacy gateway runs as-is without modification
-- The control plane can be developed and tested independently
-- Client applications connect to a stable local endpoint
-- The data plane can be rewritten later without changing the control plane
-
-**Do not collapse these into one service yet.** After the control plane and
-provider model are stable, we may decide whether the data plane should be
-rewritten. That decision belongs to a later phase.
+The legacy gateway (`legacy/OpusGateway.py`) remains in the repo as
+reference only. The first-party data plane reads the active credential from
+the SecretStore instead of a plaintext `active_key.txt` file, routes
+multiple providers/models, and speaks both major wire protocols — so one
+local endpoint serves every client (Claude Code, Codex, Cline, Roo Code,
+OpenAI SDKs, ...) regardless of the backend protocol.
 
 ## Stable Endpoint Contract
 
@@ -307,7 +295,11 @@ The gateway exposes a stable local endpoint:
 
     http://<host>:<port><base_path>
 
-Default: `http://127.0.0.1:5800/v1`
+Default: `http://localhost:8400/v1`
+
+(host/port = the backend's own; the data plane is served in-process).
+`GCC_GATEWAY_PUBLIC_BASE_URL` customizes the URL written into external agent
+configs by Apply-Config.
 
 This endpoint is a **product contract**. Client applications should not need
 to change when:
@@ -316,12 +308,6 @@ to change when:
 - Credential changes
 - Session changes
 - Backend management changes
-
-The endpoint URL is constructed from configuration:
-- `gateway_protocol` (default: `http`)
-- `gateway_host` (default: `127.0.0.1`)
-- `gateway_port` (default: `5800`)
-- `gateway_base_path` (default: `/v1`)
 
 The `GET /api/gateway/config` endpoint returns the full configuration including
 the constructed endpoint URL. The frontend uses this to display the stable
@@ -444,6 +430,280 @@ The adapter:
 - Never logs the credential value
 - Reports failures clearly
 - The legacy gateway discovers changes on its own reload cycle (no restart)
+
+## Session Management (Phase 4.1)
+
+### Sessions Are Not Credentials
+
+A **session** and an **API credential** are completely separate concepts:
+
+```
+Provider
+   ↓
+Session   — provider-side management access (dashboard cookie/token)
+   +
+Credential — API access (API key / bearer token)
+   +
+Model
+```
+
+- A credential is used for API access (the gateway data plane).
+- A session may be required by a provider for provider-side **management**
+  operations (e.g. listing/creating/deleting API keys on a dashboard).
+- Not every provider requires a session. The application never assumes
+  one-provider = one-session, nor that any provider has a session at all.
+  Multiple sessions per provider are supported; at most one session per
+  provider is `active` at a time (enforced by SessionManager).
+
+### SessionManager
+
+`SessionManager` (`app/services/session_manager.py`) is the business-logic
+owner of session state. Route handlers never contain session logic.
+
+**Operations:**
+- `list_sessions(provider_id?)` — list sessions (safe metadata only)
+- `get_session(id)` — get a single session
+- `get_active_session(provider_id?)` — active session lookup
+- `add_session(secret_value, provider_id, label?, source='manual')` — manual entry
+- `replace_session(secret_value, provider_id, label?, session_id?)` — manual replacement
+- `activate_session(id)` — activate (deactivates the provider's previous active session)
+- `deactivate_session(id)` — deactivate (preserves the record; there is no DELETE)
+- `validate_session(id)` — validate through the SessionValidator abstraction
+
+### Session Lifecycle State
+
+Tracks whether the session is in service:
+
+| State | Description |
+|-------|-------------|
+| `inactive` | Stored but not in use (default for new sessions) |
+| `active` | Currently the provider's active management session |
+| `expired` | Validation determined the session has expired |
+| `invalid` | Validation rejected the session |
+
+### Session Validation State
+
+Tracks what the last validation attempt determined:
+
+| State | Description |
+|-------|-------------|
+| `unknown` | Never validated, or provider validation unsupported (default) |
+| `valid` | Confirmed working |
+| `invalid` | Rejected |
+| `expired` | Reported expired |
+| `unavailable` | Validation could not run (e.g. endpoint down) |
+| `error` | The validator itself failed |
+
+Lifecycle and validation state are deliberately separate fields; health is
+derived from both and never persisted.
+
+### Session Health
+
+| Health | Meaning |
+|--------|---------|
+| `healthy` | validated and valid |
+| `warning` | validation unavailable/errored, or a scheduled validation is overdue |
+| `critical` | session invalid or expired |
+| `unknown` | never validated, or provider validation unsupported |
+
+The system never pretends to know something the adapter cannot determine:
+without a provider-specific validator, validation honestly reports
+`unknown` — a session is **never** reported valid merely because its secret
+exists in the SecretStore.
+
+### Session Validation Architecture
+
+Validation uses an adapter abstraction:
+
+```
+SessionManager
+     ↓
+SessionValidator (protocol)
+     ↓
+DefaultSessionValidator — returns 'unknown' (no provider adapter yet)
+Future provider-specific validators (Phase 4.2+)
+```
+
+`SessionValidationResult` supports `valid`, `invalid`, `expired`,
+`unavailable`, `unknown`, and `error`. Validation timing:
+- `last_validated` — when the last attempt ran
+- `next_validation_at` — computed from `GCC_SESSION_VALIDATION_INTERVAL`
+- manual "Validate Now" action in the UI
+
+There is **no aggressive polling** and **no automatic session renewal**. A
+later phase may let the background monitor call session validation, but
+renewal/refresh is never silent.
+
+### Session Manual Replacement Workflow
+
+Explicit user-initiated workflow:
+
+1. User clicks "Replace" on an existing session
+2. User enters the new session secret
+3. System stores the new session and validates it
+4. If validation passes (or honestly reports `unknown`), the new session
+   is activated and the previous session becomes `inactive`
+5. If validation reports `invalid`/`expired`, the new session is NOT
+   activated and the previous session is left untouched
+6. Audit events `replacement_requested` → `replacement_completed` are recorded
+
+The previous session is **deactivated, not deleted**, and replacement is
+duplicate-safe: repeated replacements each produce a new record, deactivate
+their predecessor, and always leave exactly one active session per provider.
+
+### SessionProviderAdapter (Legacy Compatibility Seam)
+
+`SessionProviderAdapter` (`app/adapters/session_provider_adapter.py`) is the
+only path by which a raw session secret may leave the SecretStore:
+
+```
+SessionManager → SecretStore
+                    ↑
+SessionProviderAdapter.get_active_session_secret(provider_id)
+                    ↓
+future provider-specific management adapter (Phase 4.2+)
+```
+
+A future provider-management adapter uses the value for one request and
+discards it. The legacy KeyBinder/pull scripts are NOT modified in this
+phase; they keep their own (hard-coded) session handling. See
+`docs/legacy-session-flow.md` for the full legacy analysis.
+
+### Session Secrets
+
+Session secrets follow the same SecretStore boundary as credentials:
+
+- Stored via `SecretStore`; SQLite holds only `secret_ref` + `session_masked`
+- Never in API responses, logs, events (`session_events` and `events`), or
+  frontend state after submission
+- Never placed in command-line arguments or subprocess environments
+- Validator error text is redacted defensively before it is persisted
+
+### Session Events
+
+Two complementary records exist:
+
+- `session_events` table — per-session audit trail (mirrors
+  `credential_events`): `created`, `imported_manually`, `validated`,
+  `activated`, `deactivated`, `invalid`, `expired`,
+  `replacement_requested`, `replacement_completed`, `warning`
+- `events` table — app-wide log entries with `session.*` types
+  (`session.created`, `session.activated`, `session.invalid`, ...)
+
+Event payloads contain only IDs and masked values — never secrets.
+
+### Session API
+
+| Method | Route | Purpose |
+|--------|-------|---------|
+| GET | `/api/sessions` | List sessions (optional `provider_id` filter) |
+| GET | `/api/sessions/health` | Health summaries + counts |
+| GET | `/api/sessions/active` | Active session (optional `provider_id`) |
+| GET | `/api/sessions/{id}` | Single session |
+| POST | `/api/sessions` | Add a session manually (201) |
+| POST | `/api/sessions/replace` | Replace an existing session |
+| POST | `/api/sessions/{id}/validate` | Validate now |
+| POST | `/api/sessions/{id}/activate` | Activate (409 if expired/invalid) |
+| POST | `/api/sessions/{id}/deactivate` | Deactivate |
+
+There is deliberately **no DELETE endpoint** — deactivation is preferred.
+
+### Why Automatic Session Renewal Is Not Implemented
+
+- Session renewal requires provider-specific login/refresh flows — exactly
+  the kind of provider-specific behavior that belongs in adapters added
+  later, not in the generic session system.
+- Silent renewal would violate the monitor-first, user-controlled policy.
+- The legacy scripts had no renewal either — they simply failed when the
+  cookie died. Phase 4.1 replaces that silent failure with clear detection
+  (validation states, health, "Session requires attention" UX) and a guided
+  manual replacement workflow.
+
+## Providers, Models, and Provider Workflows
+
+### ProviderManager
+
+`ProviderManager` (`app/services/provider_manager.py`) owns provider
+configuration. Providers declare capabilities explicitly — nothing is
+guessed:
+
+| Capability | Meaning |
+|------------|---------|
+| `credential_validation` | an adapter can validate credentials |
+| `credential_discovery` | keys can be listed (masked) |
+| `credential_creation` | keys can be created (user-initiated) |
+| `credential_revocation` | keys can be revoked (user-initiated) |
+| `session_required` | management needs a provider session |
+| `session_validation` | session-validator adapter name (registry) |
+| `dashboard_adapter` | dashboard management adapter name (registry) |
+
+Also: generic reachability health probes, OpenAI-compatible model
+discovery (`GET {base_url}/models`, imports as disabled models), and the
+OpenRouter quick-add template.
+
+### Adapter Registry
+
+`app/adapters/registry.py` maps declared adapter names to
+implementations. The built-in `opus-dashboard` adapter
+(`app/adapters/opus_dashboard.py`) implements session validation and
+key management against the legacy-style dashboard API
+(`/dashboard/api/keys` with a `opus_session` cookie, per
+`docs/legacy-session-flow.md`). Providers opt in via capabilities;
+unknown names fall back to safe defaults. The dashboard base URL can
+differ from the inference base URL via `metadata.dashboard_base_url`.
+
+### ProviderWorkflowService (user-initiated only)
+
+`app/services/provider_workflows.py` implements list / create / revoke /
+import-latest key workflows. Every action is:
+- capability-gated (403 when not declared)
+- session-gated (active session required)
+- explicit (no polling, no rotation, no quota auto-recovery)
+
+Created keys are stored as `source=provider-assisted` credentials that
+start **inactive** — the user validates and activates them. Import-latest
+compares with the active credential and only creates a new one when the
+key actually changed.
+
+### ModelManager
+
+`ModelManager` (`app/services/model_manager.py`) owns model configuration:
+per-provider models with at most one default and one fallback each, manual
+enable/disable, and the routing registry the gateway consults.
+
+## Usage Monitoring
+
+`UsageManager` (`app/services/usage_manager.py`):
+- per-credential counters (updated by the gateway on every completion)
+- periodic snapshots into `usage_snapshots` (monitor + manual capture)
+- runtime thresholds (`usage_limit`, `usage_warning_threshold`) with a
+  duplicate-suppressed `usage.warning` event
+- best-effort legacy `token_usage.json` import
+
+## Apply Config (Agents & Apps)
+
+`ConfigApplier` (`app/services/config_applier.py`) writes the gateway
+endpoint into installed apps and CLI agents on explicit Apply:
+
+| Target | What is written |
+|--------|-----------------|
+| Claude Code | `~/.claude/settings.json` env: `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` |
+| Claude Desktop | `claude_desktop_config.json` (platform paths), same env keys |
+| Codex CLI | `~/.codex/config.toml` (`[model_providers.gcc]`, `wire_api="responses"`) |
+| Codex (app/IDE) | shares `~/.codex/config.toml` |
+| Grok Build | `~/.grok/user-settings.json` (best-effort) |
+| Cline | VS Code `settings.json` (`cline.openAiCompatible.*`) |
+| Roo Code | VS Code `settings.json` (`roo-cline.*`, Anthropic mode through the gateway) |
+
+Safety: master toggle + per-target toggles, writes only on Apply, every
+write backed up (`*.gcc-backup`), Revert restores. JSON files are merged
+(never clobbered); Codex TOML is parsed and re-serialized (reported as
+error, file untouched, if unparsable).
+
+Because the gateway speaks the Anthropic Messages API at `/v1/messages`
+regardless of backend protocol, Claude-side agents work against any
+backend; OpenAI-side agents use `/v1/chat/completions` and Codex uses
+`/v1/responses`.
 
 ### CredentialHealthManager
 
@@ -568,16 +828,18 @@ the default behavior.
 
 ## What Is Intentionally NOT Implemented Yet
 
-Phase 3.1 implements CredentialManager and manual credential management. The following are NOT implemented:
+The system is complete through the provider/router/agent integration scope.
+The following are intentionally NOT implemented:
 
-- Credential management (Phase 3)
-- Session management (Phase 4)
-- Usage monitoring (Phase 5)
-- Provider system (Phase 6)
-- Model system (Phase 7)
-- Provider-specific credential workflows (Phase 8)
-- UI completion (Phase 9)
-- Electron packaging (Phase 10)
+- Automatic credential rotation / session renewal (provider-specific,
+  opt-in workflows only — the monitor-first policy forbids silent action)
+- Automatic quota recovery (legacy "delete all keys and retry" is replaced
+  by a surfaced error + user decision)
+- Electron desktop packaging (the web UI + local backend covers the same
+  scope; Electron remains an option for a later release)
+- Full fidelity of every client-side protocol edge case (e.g. exact
+  reasoning-token accounting across translation) — the gateway covers the
+  standard OpenAI / Anthropic / Responses surfaces
 
 ## Legacy Reference
 
