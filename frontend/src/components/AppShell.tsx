@@ -18,6 +18,7 @@ const NAV_ITEMS = [
   { to: '/sessions',     label: 'Sessions',     icon: '◎' },
   { to: '/providers',    label: 'Providers',    icon: '⬡' },
   { to: '/models',       label: 'Models',       icon: '◈' },
+  { to: '/agents',       label: 'Agents',       icon: '⬢' },
   { to: '/usage',        label: 'Usage',        icon: '▤' },
   { to: '/logs',         label: 'Logs',         icon: '≡' },
   { to: '/settings',     label: 'Settings',     icon: '⚙' },

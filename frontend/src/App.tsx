@@ -13,6 +13,7 @@ import { CredentialsPage } from './pages/CredentialsPage';
 import { SessionsPage } from './pages/SessionsPage';
 import { ProvidersPage } from './pages/ProvidersPage';
 import { ModelsPage } from './pages/ModelsPage';
+import { AgentsPage } from './pages/AgentsPage';
 import { UsagePage } from './pages/UsagePage';
 import { LogsPage } from './pages/LogsPage';
 import { SettingsPage } from './pages/SettingsPage';
@@ -29,6 +30,7 @@ export default function App() {
           <Route path="/sessions" element={<SessionsPage />} />
           <Route path="/providers" element={<ProvidersPage />} />
           <Route path="/models" element={<ModelsPage />} />
+          <Route path="/agents" element={<AgentsPage />} />
           <Route path="/usage" element={<UsagePage />} />
           <Route path="/logs" element={<LogsPage />} />
           <Route path="/settings" element={<SettingsPage />} />

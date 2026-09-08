@@ -225,6 +225,24 @@ class CredentialMonitor:
             # Check all due credentials
             results = await self._health_manager.check_all_due_credentials()
 
+            # Check due sessions (no renewal — validation only)
+            sessions_checked = 0
+            try:
+                from app.services.session_manager import get_session_manager
+                session_manager = get_session_manager()
+                session_results = await session_manager.check_all_due_sessions()
+                sessions_checked = len(session_results)
+            except Exception as e:
+                logger.warning("Session checks skipped in monitor cycle: %s", e)
+
+            # Capture a usage snapshot
+            usage_snapshot = None
+            try:
+                from app.services.usage_manager import get_usage_manager
+                usage_snapshot = await get_usage_manager().capture_snapshot()
+            except Exception as e:
+                logger.warning("Usage capture skipped in monitor cycle: %s", e)
+
             # Process results and detect health changes
             cycle_succeeded = 0
             cycle_failed = 0
@@ -272,19 +290,23 @@ class CredentialMonitor:
                 "info",
                 f"Monitor cycle {self._total_cycles} completed: "
                 f"{len(results)} credentials checked, "
+                f"{sessions_checked} sessions checked, "
                 f"{cycle_succeeded} succeeded, {cycle_failed} failed, "
                 f"{len(health_changes)} health changes",
             )
 
             logger.info(
-                "Monitor cycle %d completed: %d checked, %d succeeded, %d failed, %d health changes",
-                self._total_cycles, len(results), cycle_succeeded, cycle_failed, len(health_changes),
+                "Monitor cycle %d completed: %d credentials checked, %d sessions checked, "
+                "%d succeeded, %d failed, %d health changes",
+                self._total_cycles, len(results), sessions_checked,
+                cycle_succeeded, cycle_failed, len(health_changes),
             )
 
             return {
                 "success": True,
-                "message": f"Cycle completed: {len(results)} credentials checked",
+                "message": f"Cycle completed: {len(results)} credentials checked, {sessions_checked} sessions checked",
                 "credentials_checked": len(results),
+                "sessions_checked": sessions_checked,
                 "checks_succeeded": cycle_succeeded,
                 "checks_failed": cycle_failed,
                 "health_changes": len(health_changes),

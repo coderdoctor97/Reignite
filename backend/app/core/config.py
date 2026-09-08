@@ -43,6 +43,21 @@ class Settings(BaseSettings):
     # ── CORS ─────────────────────────────────────────────────────
     cors_origins: str = "http://localhost:5173,http://localhost:4173"
 
+    # ── Gateway (first-party data plane) ─────────────────────────
+    # The built-in gateway is served in-process under /v1 by the backend.
+    gateway_enabled: bool = True
+    gateway_base_path: str = "/v1"
+    # Optional API key clients must send as Bearer token. Empty = accept any
+    # bearer token (local single-user trust model).
+    gateway_api_key: str = ""
+    gateway_default_max_tokens: int = 4096
+    # Public URL written into CLI/IDE agent configs by the Apply-Config feature.
+    gateway_public_base_url: str = "http://localhost:8400"
+    gateway_auth_token: str = "gcc-local"
+    # Timeouts for upstream provider calls (seconds)
+    gateway_upstream_timeout: float = 300.0
+    gateway_upstream_connect_timeout: float = 10.0
+
     # ── Legacy compatibility ─────────────────────────────────────
     legacy_base_dir: str = str(_PROJECT_ROOT / "legacy")
 
@@ -69,6 +84,15 @@ class Settings(BaseSettings):
     # renewal is performed — validation is manual or monitor-driven.
     session_validation_interval: float = 3600.0  # default: 1 hour
     session_validation_enabled: bool = True
+
+    # ── Usage monitoring ────────────────────────────────────────
+    usage_limit: int = 1_500_000               # total token budget
+    usage_warning_threshold: int = 1_000_000   # warn when usage passes this
+    usage_capture_interval: float = 60.0       # seconds between snapshot captures
+
+    # ── Demo provider (local mock for testing) ──────────────────
+    demo_provider_enabled: bool = True
+    demo_provider_url: str = "http://localhost:5900"
 
     model_config = {
         "env_prefix": "GCC_",

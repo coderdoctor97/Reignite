@@ -386,12 +386,27 @@ class SessionManager:
                 raise ValueError(f"Session not found: {session_id}")
             provider_id = row.provider_id
             secret_ref = row.secret_ref
+            provider = await ProviderRepository.get_by_id(session, provider_id)
 
         secret_value = None
         if secret_ref:
             secret_value = self._secret_store.retrieve(secret_ref)
 
-        result = await self._validator.validate(row, secret_value=secret_value)
+        # Provider-aware validator selection: providers may declare a
+        # session_validation adapter via capabilities_json; otherwise the
+        # manager's validator (default: honest 'unknown') is used.
+        import json as _json
+        validator = self._validator
+        if provider is not None:
+            try:
+                declared = (_json.loads(provider.capabilities_json or "{}") or {}).get("session_validation")
+            except (ValueError, TypeError):
+                declared = None
+            if declared:
+                from app.adapters.registry import get_session_validator
+                validator = get_session_validator(provider)
+
+        result = await validator.validate(row, secret_value=secret_value)
 
         # Defense-in-depth: never let a (future, provider-specific)
         # validator's error text echo the secret into the database,
@@ -600,6 +615,37 @@ class SessionManager:
 
         logger.info("Session deactivated: id=%s", session_id)
         return await self.get_session(session_id)
+
+    async def check_all_due_sessions(self) -> list[dict]:
+        """Validate all sessions whose next_validation_at is due.
+
+        Called by the background monitor (Phase 4.2 integration).
+        Validation only — never renewal.
+        """
+        from sqlalchemy import select, or_
+
+        now = _utcnow()
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(SessionRow)
+                .where(
+                    or_(
+                        SessionRow.next_validation_at <= now,
+                        SessionRow.next_validation_at.is_(None),
+                    )
+                )
+                .where(SessionRow.lifecycle_state.in_(["active", "inactive"]))
+                .order_by(SessionRow.created_at.desc())
+            )
+            rows = list(result.scalars().all())
+
+        results = []
+        for row in rows:
+            try:
+                results.append(await self.validate_session(row.id))
+            except Exception as e:
+                logger.error("Failed to validate due session %s: %s", row.id, e)
+        return results
 
     async def replace_session(
         self,
